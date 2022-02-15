@@ -337,7 +337,7 @@ async fn can_handle_underscore_functions() {
     let data = simplestorage_mod::HashPuzzleCall.encode();
     let tx = Eip1559TransactionRequest::new().data(data).to(addr);
     let tx = TypedTransaction::Eip1559(tx);
-    let res5 = client.call(&tx, None).await.unwrap();
+    let res5 = client.call(&tx, None, None).await.unwrap();
     let res5 = U256::from(res5.as_ref());
     assert_eq!(res, 100.into());
     assert_eq!(res, res2);

@@ -239,6 +239,7 @@ impl<M: Middleware> Contract<M> {
             tx,
             client: Arc::clone(&self.client), // cheap clone behind the Arc
             block: None,
+            state_override: None,
             function: function.to_owned(),
             datatype: PhantomData,
         })

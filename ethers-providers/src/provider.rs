@@ -16,9 +16,9 @@ use ethers_core::{
     types::{
         transaction::{eip2718::TypedTransaction, eip2930::AccessListWithGasUsed},
         Address, Block, BlockId, BlockNumber, BlockTrace, Bytes, EIP1186ProofResponse, FeeHistory,
-        Filter, Log, NameOrAddress, Selector, Signature, Trace, TraceFilter, TraceType,
-        Transaction, TransactionReceipt, TxHash, TxpoolContent, TxpoolInspect, TxpoolStatus, H256,
-        U256, U64,
+        Filter, Log, NameOrAddress, Selector, Signature, StateOverride, Trace, TraceFilter,
+        TraceType, Transaction, TransactionReceipt, TxHash, TxpoolContent, TxpoolInspect,
+        TxpoolStatus, H256, U256, U64,
     },
     utils,
 };
@@ -537,10 +537,12 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         &self,
         tx: &TypedTransaction,
         block: Option<BlockId>,
+        state_override: Option<StateOverride>,
     ) -> Result<Bytes, ProviderError> {
         let tx = utils::serialize(tx);
         let block = utils::serialize(&block.unwrap_or_else(|| BlockNumber::Latest.into()));
-        self.request("eth_call", [tx, block]).await
+        let state_override = utils::serialize(&state_override.unwrap_or_default());
+        self.request("eth_call", [tx, block, state_override]).await
     }
 
     /// Sends a transaction to a single Ethereum node and return the estimated amount of gas
@@ -987,7 +989,7 @@ impl<P: JsonRpcClient> Provider<P> {
 
         // first get the resolver responsible for this name
         // the call will return a Bytes array which we convert to an address
-        let data = self.call(&ens::get_resolver(ens_addr, ens_name).into(), None).await?;
+        let data = self.call(&ens::get_resolver(ens_addr, ens_name).into(), None, None).await?;
 
         let resolver_address: Address = decode_bytes(ParamType::Address, data);
         if resolver_address == Address::zero() {
@@ -995,8 +997,9 @@ impl<P: JsonRpcClient> Provider<P> {
         }
 
         // resolve
-        let data =
-            self.call(&ens::resolve(resolver_address, selector, ens_name).into(), None).await?;
+        let data = self
+            .call(&ens::resolve(resolver_address, selector, ens_name).into(), None, None)
+            .await?;
 
         Ok(decode_bytes(param, data))
     }

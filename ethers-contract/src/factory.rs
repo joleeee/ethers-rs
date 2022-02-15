@@ -57,7 +57,7 @@ impl<M: Middleware> Deployer<M> {
     /// Note: this function _does not_ send a transaction from your account
     pub async fn call(&self) -> Result<(), ContractError<M>> {
         self.client
-            .call(&self.tx, Some(self.block.into()))
+            .call(&self.tx, Some(self.block.into()), None)
             .await
             .map_err(ContractError::MiddlewareError)?;
 
