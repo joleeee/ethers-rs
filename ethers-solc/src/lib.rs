@@ -1,14 +1,16 @@
+#![deny(rustdoc::broken_intra_doc_links)]
 pub mod artifacts;
 pub mod sourcemap;
 
 pub use artifacts::{CompilerInput, CompilerOutput, EvmVersion};
+use std::collections::BTreeMap;
 
 mod artifact_output;
 pub mod cache;
 pub mod hh;
 pub use artifact_output::*;
 
-mod resolver;
+pub mod resolver;
 pub use hh::{HardhatArtifact, HardhatArtifacts};
 pub use resolver::Graph;
 
@@ -22,21 +24,24 @@ mod config;
 pub use config::{AllowedLibPaths, PathStyle, ProjectPathsConfig, SolcConfig};
 
 pub mod remappings;
-use crate::artifacts::Source;
+use crate::artifacts::{Source, SourceFile};
 
 pub mod error;
+mod filter;
 pub mod report;
 pub mod utils;
+pub use filter::{FileFilter, TestFileFilter};
 
 use crate::{
-    artifacts::{Contract, Sources},
+    artifacts::Sources,
+    cache::SolFilesCache,
+    contracts::VersionedContracts,
     error::{SolcError, SolcIoError},
 };
+use artifacts::contract::Contract;
 use error::Result;
-use std::{
-    marker::PhantomData,
-    path::{Path, PathBuf},
-};
+use semver::Version;
+use std::path::{Path, PathBuf};
 
 /// Utilities for creating, mocking and testing of (temporary) projects
 #[cfg(feature = "project-util")]
@@ -44,8 +49,8 @@ pub mod project_util;
 
 /// Represents a project workspace and handles `solc` compiling of all contracts in that workspace.
 #[derive(Debug)]
-pub struct Project<Artifacts: ArtifactOutput = MinimalCombinedArtifacts> {
-    /// The layout of the
+pub struct Project<T: ArtifactOutput = ConfigurableArtifacts> {
+    /// The layout of the project
     pub paths: ProjectPathsConfig,
     /// Where to find solc
     pub solc: Solc,
@@ -57,8 +62,8 @@ pub struct Project<Artifacts: ArtifactOutput = MinimalCombinedArtifacts> {
     pub no_artifacts: bool,
     /// Whether writing artifacts to disk is enabled
     pub auto_detect: bool,
-    /// How to handle compiler output
-    pub artifacts: PhantomData<Artifacts>,
+    /// Handles all artifacts related tasks, reading and writing from the artifact dir.
+    pub artifacts: T,
     /// Errors/Warnings which match these error codes are not going to be logged
     pub ignored_error_codes: Vec<u64>,
     /// The paths which will be allowed for library inclusion
@@ -74,7 +79,7 @@ impl Project {
     ///
     /// # Example
     ///
-    /// Configure with `MinimalCombinedArtifacts` artifacts output
+    /// Configure with `ConfigurableArtifacts` artifacts output
     ///
     /// ```rust
     /// use ethers_solc::Project;
@@ -91,15 +96,15 @@ impl Project {
     /// or use the builder directly
     ///
     /// ```rust
-    /// use ethers_solc::{MinimalCombinedArtifacts, ProjectBuilder};
-    /// let config = ProjectBuilder::<MinimalCombinedArtifacts>::default().build().unwrap();
+    /// use ethers_solc::{ConfigurableArtifacts, ProjectBuilder};
+    /// let config = ProjectBuilder::<ConfigurableArtifacts>::default().build().unwrap();
     /// ```
     pub fn builder() -> ProjectBuilder {
         ProjectBuilder::default()
     }
 }
 
-impl<Artifacts: ArtifactOutput> Project<Artifacts> {
+impl<T: ArtifactOutput> Project<T> {
     /// Returns the path to the artifacts directory
     pub fn artifacts_path(&self) -> &PathBuf {
         &self.paths.artifacts
@@ -120,9 +125,22 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
         &self.paths.root
     }
 
-    /// Applies the configured settings to the given `Solc`
+    /// Returns the handler that takes care of processing all artifacts
+    pub fn artifacts_handler(&self) -> &T {
+        &self.artifacts
+    }
+
+    /// Convenience function to read the cache file.
+    /// See also [SolFilesCache::read_joined()]
+    pub fn read_cache_file(&self) -> Result<SolFilesCache> {
+        SolFilesCache::read_joined(&self.paths)
+    }
+
+    /// Applies the configured arguments to the given `Solc`
+    ///
+    /// This will set the `--allow-paths` to the paths configured for the `Project`, if any.
     fn configure_solc(&self, mut solc: Solc) -> Solc {
-        if self.allowed_lib_paths.0.is_empty() {
+        if solc.args.is_empty() && !self.allowed_lib_paths.0.is_empty() {
             solc = solc.arg("--allow-paths").arg(self.allowed_lib_paths.to_string());
         }
         solc
@@ -175,7 +193,7 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
     /// `CompilerOutput::has_error` instead.
     ///
     /// NB: If the `svm` feature is enabled, this function will automatically detect
-    /// solc versions across files, see [`Self::svm_compile()`]
+    /// solc versions across files.
     ///
     /// # Example
     ///
@@ -187,11 +205,11 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
     /// # }
     /// ```
     #[tracing::instrument(skip_all, name = "compile")]
-    pub fn compile(&self) -> Result<ProjectCompileOutput<Artifacts>> {
+    pub fn compile(&self) -> Result<ProjectCompileOutput<T>> {
         let sources = self.paths.read_input_files()?;
         tracing::trace!("found {} sources to compile: {:?}", sources.len(), sources.keys());
 
-        #[cfg(all(feature = "svm", feature = "async"))]
+        #[cfg(all(feature = "svm-solc", feature = "async"))]
         if self.auto_detect {
             tracing::trace!("using solc auto detection to compile sources");
             return self.svm_compile(sources)
@@ -225,9 +243,94 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
     /// let output = project.svm_compile(sources).unwrap();
     /// # }
     /// ```
-    #[cfg(all(feature = "svm", feature = "async"))]
-    pub fn svm_compile(&self, sources: Sources) -> Result<ProjectCompileOutput<Artifacts>> {
+    #[cfg(all(feature = "svm-solc", feature = "async"))]
+    pub fn svm_compile(&self, sources: Sources) -> Result<ProjectCompileOutput<T>> {
         project::ProjectCompiler::with_sources(self, sources)?.compile()
+    }
+
+    /// Convenience function to compile a single solidity file with the project's settings.
+    /// Same as [`Self::svm_compile()`] but with the given `file` as input.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ethers_solc::Project;
+    /// # fn demo(project: Project) {
+    /// let project = Project::builder().build().unwrap();
+    /// let output = project.compile_file("example/Greeter.sol").unwrap();
+    /// # }
+    /// ```
+    #[cfg(all(feature = "svm-solc", feature = "async"))]
+    pub fn compile_file(&self, file: impl Into<PathBuf>) -> Result<ProjectCompileOutput<T>> {
+        let file = file.into();
+        let source = Source::read(&file)?;
+        project::ProjectCompiler::with_sources(self, Sources::from([(file, source)]))?.compile()
+    }
+
+    /// Convenience function to compile a series of solidity files with the project's settings.
+    /// Same as [`Self::svm_compile()`] but with the given `files` as input.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ethers_solc::Project;
+    /// # fn demo(project: Project) {
+    /// let project = Project::builder().build().unwrap();
+    /// let output = project
+    ///     .compile_files(
+    ///         vec!["examples/Foo.sol", "examples/Bar.sol"]
+    ///     ).unwrap();
+    /// # }
+    /// ```
+    #[cfg(all(feature = "svm-solc", feature = "async"))]
+    pub fn compile_files<P, I>(&self, files: I) -> Result<ProjectCompileOutput<T>>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        project::ProjectCompiler::with_sources(self, Source::read_all(files)?)?.compile()
+    }
+
+    /// Convenience function to compile only (re)compile files that match the provided [FileFilter].
+    /// Same as [`Self::svm_compile()`] but with only with those files as input that match
+    /// [FileFilter::is_match()].
+    ///
+    /// # Example - Only compile Test files
+    ///
+    /// ```
+    /// use ethers_solc::{Project, TestFileFilter};
+    /// # fn demo(project: Project) {
+    /// let project = Project::builder().build().unwrap();
+    /// let output = project
+    ///     .compile_sparse(
+    ///         TestFileFilter::default()
+    ///     ).unwrap();
+    /// # }
+    /// ```
+    ///
+    /// # Example - Apply a custom filter
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// use ethers_solc::Project;
+    /// # fn demo(project: Project) {
+    /// let project = Project::builder().build().unwrap();
+    /// let output = project
+    ///     .compile_sparse(
+    ///         |path: &Path| path.ends_with("Greeter.sol")
+    ///     ).unwrap();
+    /// # }
+    /// ```
+    #[cfg(all(feature = "svm-solc", feature = "async"))]
+    pub fn compile_sparse<F: FileFilter + 'static>(
+        &self,
+        filter: F,
+    ) -> Result<ProjectCompileOutput<T>> {
+        let sources =
+            Source::read_all(self.paths.input_files().into_iter().filter(|p| filter.is_match(p)))?;
+
+        let filter: Box<dyn FileFilter> = Box::new(filter);
+        project::ProjectCompiler::with_sources(self, sources)?.with_sparse_output(filter).compile()
     }
 
     /// Compiles the given source files with the exact `Solc` executable
@@ -257,7 +360,7 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
         &self,
         solc: &Solc,
         sources: Sources,
-    ) -> Result<ProjectCompileOutput<Artifacts>> {
+    ) -> Result<ProjectCompileOutput<T>> {
         project::ProjectCompiler::with_sources_and_solc(
             self,
             sources,
@@ -323,9 +426,48 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
     pub fn flatten(&self, target: &Path) -> Result<String> {
         self.paths.flatten(target)
     }
+
+    /// Returns standard-json-input to compile the target contract
+    pub fn standard_json_input(&self, target: impl AsRef<Path>) -> Result<CompilerInput> {
+        let target = target.as_ref();
+        tracing::trace!("Building standard-json-input for {:?}", target);
+        let graph = Graph::resolve(&self.paths)?;
+        let target_index = graph.files().get(target).ok_or_else(|| {
+            SolcError::msg(format!("cannot resolve file at {:?}", target.display()))
+        })?;
+        let mut sources = Vec::new();
+        let (path, source) = graph.node(*target_index).unpack();
+        sources.push((path, source));
+        sources.extend(
+            graph.all_imported_nodes(*target_index).map(|index| graph.node(index).unpack()),
+        );
+
+        let compiler_inputs = CompilerInput::with_sources(
+            sources.into_iter().map(|(s, p)| (s.clone(), p.clone())).collect(),
+        );
+
+        // strip the path to the project root from all remappings
+        let remappings = self
+            .paths
+            .remappings
+            .clone()
+            .into_iter()
+            .map(|r| r.into_relative(self.root()).to_relative_remapping())
+            .collect::<Vec<_>>();
+
+        let compiler_input = compiler_inputs
+            .first()
+            .ok_or_else(|| SolcError::msg("cannot get the compiler input"))?
+            .clone()
+            .settings(self.solc_config.settings.clone())
+            .with_remappings(remappings)
+            .strip_prefix(self.root());
+
+        Ok(compiler_input)
+    }
 }
 
-pub struct ProjectBuilder<Artifacts: ArtifactOutput = MinimalCombinedArtifacts> {
+pub struct ProjectBuilder<T: ArtifactOutput = ConfigurableArtifacts> {
     /// The layout of the
     paths: Option<ProjectPathsConfig>,
     /// Where to find solc
@@ -340,7 +482,8 @@ pub struct ProjectBuilder<Artifacts: ArtifactOutput = MinimalCombinedArtifacts> 
     auto_detect: bool,
     /// Use offline mode
     offline: bool,
-    artifacts: PhantomData<Artifacts>,
+    /// handles all artifacts related tasks
+    artifacts: T,
     /// Which error codes to ignore
     pub ignored_error_codes: Vec<u64>,
     /// All allowed paths
@@ -348,7 +491,24 @@ pub struct ProjectBuilder<Artifacts: ArtifactOutput = MinimalCombinedArtifacts> 
     solc_jobs: Option<usize>,
 }
 
-impl<Artifacts: ArtifactOutput> ProjectBuilder<Artifacts> {
+impl<T: ArtifactOutput> ProjectBuilder<T> {
+    /// Create a new builder with the given artifacts handler
+    pub fn new(artifacts: T) -> Self {
+        Self {
+            paths: None,
+            solc: None,
+            solc_config: None,
+            cached: true,
+            no_artifacts: false,
+            auto_detect: true,
+            offline: false,
+            artifacts,
+            ignored_error_codes: Vec::new(),
+            allowed_paths: vec![],
+            solc_jobs: None,
+        }
+    }
+
     #[must_use]
     pub fn paths(mut self, paths: ProjectPathsConfig) -> Self {
         self.paths = Some(paths);
@@ -454,7 +614,7 @@ impl<Artifacts: ArtifactOutput> ProjectBuilder<Artifacts> {
     }
 
     /// Set arbitrary `ArtifactOutputHandler`
-    pub fn artifacts<A: ArtifactOutput>(self) -> ProjectBuilder<A> {
+    pub fn artifacts<A: ArtifactOutput>(self, artifacts: A) -> ProjectBuilder<A> {
         let ProjectBuilder {
             paths,
             solc,
@@ -476,7 +636,7 @@ impl<Artifacts: ArtifactOutput> ProjectBuilder<Artifacts> {
             no_artifacts,
             auto_detect,
             offline,
-            artifacts: PhantomData::default(),
+            artifacts,
             ignored_error_codes,
             allowed_paths,
             solc_jobs,
@@ -485,7 +645,7 @@ impl<Artifacts: ArtifactOutput> ProjectBuilder<Artifacts> {
 
     /// Adds an allowed-path to the solc executable
     #[must_use]
-    pub fn allowed_path<T: Into<PathBuf>>(mut self, path: T) -> Self {
+    pub fn allowed_path<P: Into<PathBuf>>(mut self, path: P) -> Self {
         self.allowed_paths.push(path.into());
         self
     }
@@ -503,7 +663,7 @@ impl<Artifacts: ArtifactOutput> ProjectBuilder<Artifacts> {
         self
     }
 
-    pub fn build(self) -> Result<Project<Artifacts>> {
+    pub fn build(self) -> Result<Project<T>> {
         let Self {
             paths,
             solc,
@@ -544,34 +704,101 @@ impl<Artifacts: ArtifactOutput> ProjectBuilder<Artifacts> {
     }
 }
 
-impl<Artifacts: ArtifactOutput> Default for ProjectBuilder<Artifacts> {
+impl<T: ArtifactOutput + Default> Default for ProjectBuilder<T> {
     fn default() -> Self {
-        Self {
-            paths: None,
-            solc: None,
-            solc_config: None,
-            cached: true,
-            no_artifacts: false,
-            auto_detect: true,
-            offline: false,
-            artifacts: PhantomData::default(),
-            ignored_error_codes: Vec::new(),
-            allowed_paths: vec![],
-            solc_jobs: None,
-        }
+        Self::new(T::default())
     }
 }
 
-impl<Artifacts: ArtifactOutput> ArtifactOutput for Project<Artifacts> {
-    type Artifact = Artifacts::Artifact;
+impl<T: ArtifactOutput> ArtifactOutput for Project<T> {
+    type Artifact = T::Artifact;
 
-    fn contract_to_artifact(file: &str, name: &str, contract: Contract) -> Self::Artifact {
-        Artifacts::contract_to_artifact(file, name, contract)
+    fn on_output(
+        &self,
+        contracts: &VersionedContracts,
+        sources: &BTreeMap<String, SourceFile>,
+        layout: &ProjectPathsConfig,
+    ) -> Result<Artifacts<Self::Artifact>> {
+        self.artifacts_handler().on_output(contracts, sources, layout)
+    }
+
+    fn write_contract_extras(&self, contract: &Contract, file: &Path) -> Result<()> {
+        self.artifacts_handler().write_contract_extras(contract, file)
+    }
+
+    fn write_extras(
+        &self,
+        contracts: &VersionedContracts,
+        layout: &ProjectPathsConfig,
+    ) -> Result<()> {
+        self.artifacts_handler().write_extras(contracts, layout)
+    }
+
+    fn output_file_name(name: impl AsRef<str>) -> PathBuf {
+        T::output_file_name(name)
+    }
+
+    fn output_file_name_versioned(name: impl AsRef<str>, version: &Version) -> PathBuf {
+        T::output_file_name_versioned(name, version)
+    }
+
+    fn output_file(contract_file: impl AsRef<Path>, name: impl AsRef<str>) -> PathBuf {
+        T::output_file(contract_file, name)
+    }
+
+    fn output_file_versioned(
+        contract_file: impl AsRef<Path>,
+        name: impl AsRef<str>,
+        version: &Version,
+    ) -> PathBuf {
+        T::output_file_versioned(contract_file, name, version)
+    }
+
+    fn contract_name(file: impl AsRef<Path>) -> Option<String> {
+        T::contract_name(file)
+    }
+
+    fn output_exists(
+        contract_file: impl AsRef<Path>,
+        name: impl AsRef<str>,
+        root: impl AsRef<Path>,
+    ) -> bool {
+        T::output_exists(contract_file, name, root)
+    }
+
+    fn read_cached_artifact(path: impl AsRef<Path>) -> Result<Self::Artifact> {
+        T::read_cached_artifact(path)
+    }
+
+    fn read_cached_artifacts<P, I>(files: I) -> Result<BTreeMap<PathBuf, Self::Artifact>>
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        T::read_cached_artifacts(files)
+    }
+
+    fn contract_to_artifact(
+        &self,
+        file: &str,
+        name: &str,
+        contract: Contract,
+        source_file: Option<&SourceFile>,
+    ) -> Self::Artifact {
+        self.artifacts_handler().contract_to_artifact(file, name, contract, source_file)
+    }
+
+    fn output_to_artifacts(
+        &self,
+        contracts: &VersionedContracts,
+        sources: &BTreeMap<String, SourceFile>,
+    ) -> Artifacts<Self::Artifact> {
+        self.artifacts_handler().output_to_artifacts(contracts, sources)
     }
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "svm", feature = "async"))]
+#[cfg(all(feature = "svm-solc", feature = "async"))]
 mod tests {
     use crate::remappings::Remapping;
 

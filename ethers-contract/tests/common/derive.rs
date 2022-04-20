@@ -572,3 +572,27 @@ fn can_derive_ethcall_for_bytes() {
 
     assert_ethcall::<BatchCall>();
 }
+
+#[test]
+fn can_derive_array_tuples() {
+    #[derive(Clone, Debug, Default, Eq, PartialEq, EthEvent, EthDisplay)]
+    #[ethevent(name = "DiamondCut", abi = "DiamondCut((address,uint8,bytes4[])[],address,bytes)")]
+    pub struct DiamondCutFilter {
+        pub diamond_cut: Vec<(Address, u8, Vec<[u8; 4]>)>,
+        pub init: Address,
+        pub calldata: Bytes,
+    }
+}
+
+#[test]
+fn eth_display_works_on_ethers_bytes() {
+    #[derive(Clone, Debug, Default, Eq, PartialEq, EthCall, EthDisplay)]
+    #[ethcall(name = "logBytes", abi = "logBytes(bytes)")]
+    pub struct LogBytesCall {
+        pub p_0: ethers_core::types::Bytes,
+    }
+    let call = LogBytesCall { p_0: hex::decode(b"aaaaaa").unwrap().into() };
+
+    let s = format!("{}", call);
+    assert_eq!(s, "0xaaaaaa");
+}

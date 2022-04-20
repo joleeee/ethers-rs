@@ -1,9 +1,11 @@
-use serde::{
-    de::{Error, Unexpected},
-    Deserialize, Deserializer, Serialize, Serializer,
-};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use thiserror::Error;
 
-use std::fmt::{Display, Formatter, LowerHex, Result as FmtResult};
+use std::{
+    clone::Clone,
+    fmt::{Debug, Display, Formatter, LowerHex, Result as FmtResult},
+    str::FromStr,
+};
 
 /// Wrapper type around Bytes to deserialize/serialize "0x" prefixed ethereum hex strings
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
@@ -64,6 +66,24 @@ impl<'a, const N: usize> From<&'a [u8; N]> for Bytes {
     }
 }
 
+#[derive(Debug, Clone, Error)]
+#[error("Failed to parse bytes: {0}")]
+pub struct ParseBytesError(String);
+
+impl FromStr for Bytes {
+    type Err = ParseBytesError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(value) = value.strip_prefix("0x") {
+            hex::decode(value)
+        } else {
+            hex::decode(&value)
+        }
+        .map(Into::into)
+        .map_err(|e| ParseBytesError(format!("Invalid hex: {}", e)))
+    }
+}
+
 pub fn serialize_bytes<S, T>(x: T, s: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -77,13 +97,13 @@ where
     D: Deserializer<'de>,
 {
     let value = String::deserialize(d)?;
-    if value.len() >= 2 && &value[0..2] == "0x" {
-        let bytes: Vec<u8> =
-            hex::decode(&value[2..]).map_err(|e| Error::custom(format!("Invalid hex: {}", e)))?;
-        Ok(bytes.into())
+    if let Some(value) = value.strip_prefix("0x") {
+        hex::decode(value)
     } else {
-        Err(Error::invalid_value(Unexpected::Str(&value), &"0x prefix"))
+        hex::decode(&value)
     }
+    .map(Into::into)
+    .map_err(|e| serde::de::Error::custom(e.to_string()))
 }
 
 #[cfg(test)]
@@ -96,5 +116,17 @@ mod tests {
         let expected = String::from("0x0123456789abcdef");
         assert_eq!(format!("{:x}", b), expected);
         assert_eq!(format!("{}", b), expected);
+    }
+
+    #[test]
+    fn test_from_str() {
+        let b = Bytes::from_str("0x1213");
+        assert!(b.is_ok());
+        let b = b.unwrap();
+        assert_eq!(b.as_ref(), hex::decode("1213").unwrap());
+
+        let b = Bytes::from_str("1213");
+        let b = b.unwrap();
+        assert_eq!(b.as_ref(), hex::decode("1213").unwrap());
     }
 }

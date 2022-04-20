@@ -32,7 +32,7 @@ pub fn parse_int_param_type(s: &str) -> Option<ParamType> {
 // Converts param types for indexed parameters to bytes32 where appropriate
 // This applies to strings, arrays, structs and bytes to follow the encoding of
 // these indexed param types according to
-// https://solidity.readthedocs.io/en/develop/abi-spec.html#encoding-of-indexed-event-parameters
+// <https://solidity.readthedocs.io/en/develop/abi-spec.html#encoding-of-indexed-event-parameters>
 pub fn topic_param_type_quote(kind: &ParamType) -> proc_macro2::TokenStream {
     let core_crate = ethers_core_crate();
     match kind {
@@ -111,21 +111,6 @@ pub fn find_parameter_type(ty: &Type) -> Result<ParamType, Error> {
             Err(Error::new(ty.span(), "Failed to derive proper ABI from array field"))
         }
         Type::Path(ty) => {
-            if let Some(ident) = ty.path.get_ident() {
-                let ident = ident.to_string().to_lowercase();
-                return match ident.as_str() {
-                    "address" => Ok(ParamType::Address),
-                    "string" => Ok(ParamType::String),
-                    "bool" => Ok(ParamType::Bool),
-                    "int" | "uint" => Ok(ParamType::Uint(256)),
-                    "h160" => Ok(ParamType::FixedBytes(20)),
-                    "h256" | "secret" | "hash" => Ok(ParamType::FixedBytes(32)),
-                    "h512" | "public" => Ok(ParamType::FixedBytes(64)),
-                    s => parse_int_param_type(s).ok_or_else(|| {
-                        Error::new(ty.span(), "Failed to derive proper ABI from fields")
-                    }),
-                }
-            }
             // check for `Vec`
             if ty.path.segments.len() == 1 && ty.path.segments[0].ident == "Vec" {
                 if let PathArguments::AngleBracketed(ref args) = ty.path.segments[0].arguments {
@@ -137,7 +122,26 @@ pub fn find_parameter_type(ty: &Type) -> Result<ParamType, Error> {
                     }
                 }
             }
-
+            let mut ident = ty.path.get_ident();
+            if ident.is_none() {
+                ident = ty.path.segments.last().map(|s| &s.ident);
+            }
+            if let Some(ident) = ident {
+                let ident = ident.to_string().to_lowercase();
+                return match ident.as_str() {
+                    "address" => Ok(ParamType::Address),
+                    "bytes" => Ok(ParamType::Bytes),
+                    "string" => Ok(ParamType::String),
+                    "bool" => Ok(ParamType::Bool),
+                    "int" | "uint" => Ok(ParamType::Uint(256)),
+                    "h160" => Ok(ParamType::FixedBytes(20)),
+                    "h256" | "secret" | "hash" => Ok(ParamType::FixedBytes(32)),
+                    "h512" | "public" => Ok(ParamType::FixedBytes(64)),
+                    s => parse_int_param_type(s).ok_or_else(|| {
+                        Error::new(ty.span(), "Failed to derive proper ABI from fields")
+                    }),
+                }
+            }
             Err(Error::new(ty.span(), "Failed to derive proper ABI from fields"))
         }
         Type::Tuple(ty) => {

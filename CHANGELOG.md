@@ -4,6 +4,18 @@
 
 ### Unreleased
 
+- Fix RLP encoding of absent access list in `Transaction` [1137](https://github.com/gakonst/ethers-rs/pull/1137)
+- Pass compilation time as additional argument to `Reporter::on_solc_success` [1098](https://github.com/gakonst/ethers-rs/pull/1098)
+- Fix aws signer bug which maps un-normalized signature to error if no normalization occurs (in `aws::utils::decode_signature`)
+- Implement signed transaction RLP decoding [#1096](https://github.com/gakonst/ethers-rs/pull/1096)
+- `Transaction::from` will default to `Address::zero()`. Add `recover_from` and
+  `recover_from_mut` methods for recovering the sender from signature, and also
+  setting the same on tx [1075](https://github.com/gakonst/ethers-rs/pull/1075).
+- Add Etherscan account API endpoints [939](https://github.com/gakonst/ethers-rs/pull/939)
+- Add FTM Mainet and testnet to parse method "try_from" from Chain.rs and add cronos mainet and testnet to "from_str"
+- Add FTM mainnet and testnet Multicall addresses [927](https://github.com/gakonst/ethers-rs/pull/927)
+- Add Cronos mainnet beta and testnet to the list of known chains
+  [926](https://github.com/gakonst/ethers-rs/pull/926)
 - `Chain::to_string` will return the same chain name as `Chain::from_str`
 - Add `eth_syncing` [848](https://github.com/gakonst/ethers-rs/pull/848)
 - Fix overflow and possible divide-by-zero in `estimate_priority_fee`
@@ -35,11 +47,27 @@
   so that the receipt can be returned to the called when deploying
   a contract [#865](https://github.com/gakonst/ethers-rs/pull/865)
 - Add Arbitrum mainnet and testnet to the list of known chains
+- Add ENS avatar and TXT records resolution
+  [#889](https://github.com/gakonst/ethers-rs/pull/889)
+- Do not override gas limits provided by an outer middleware when including an EIP-2930 access list
+  [#901](https://github.com/gakonst/ethers-rs/pull/901)
 - Add a getter to `ProjectCompileOutput` that returns a mapping of compiler
   versions to a vector of name + contract struct tuples
   [#908](https://github.com/gakonst/ethers-rs/pull/908)
+- Add Yul compilation [994](https://github.com/gakonst/ethers-rs/pull/994)
+- Enforce commutativity of ENS reverse resolution
+  [#996](https://github.com/gakonst/ethers-rs/pull/996)
 
 ## ethers-contract-abigen
+
+### Unreleased
+
+- Generate a deploy function if bytecode is provided in the abigen! input (json artifact)
+  [#1030](https://github.com/gakonst/ethers-rs/pull/1030).
+- Generate correct bindings of struct's field names that are reserved words
+  [#989](https://github.com/gakonst/ethers-rs/pull/989).
+
+### 0.6.0
 
 - Add `MultiAbigen` to generate a series of contract bindings that can be kept in the repo
   [#724](https://github.com/gakonst/ethers-rs/pull/724).
@@ -52,6 +80,12 @@
 
 ### Unreleased
 
+- Bundle svm, svm-builds and sha2 dependencies in new `svm-solc` feature
+  [#1071](https://github.com/gakonst/ethers-rs/pull/1071)
+- Wrap `ethabi::Contract` into new type `LosslessAbi` and `abi: Option<Abi>` with `abi: Option<LosslessAbi>` in `ConfigurableContractArtifact`
+  [#952](https://github.com/gakonst/ethers-rs/pull/952)
+- Let `Project` take ownership of `ArtifactOutput` and change trait interface
+  [#907](https://github.com/gakonst/ethers-rs/pull/907)
 - Total revamp of the `Project::compile` pipeline
   [#802](https://github.com/gakonst/ethers-rs/pull/802)
   - Support multiple versions of compiled contracts
@@ -74,6 +108,7 @@
   some files
 - Add support for library linking and make `Bytecode`'s `object` filed an
   `enum BytecodeObject` [#656](https://github.com/gakonst/ethers-rs/pull/656).
+- Nit: remove accidentally doubled double-quotes in an error message
 
 ### 0.6.0
 
@@ -107,6 +142,13 @@
 
 ## ethers-providers
 
+### Unreleased
+
+- Add support for basic and bearer authentication in http and non-wasm websockets.
+  [829](https://github.com/gakonst/ethers-rs/pull/829)
+- Export `ethers_providers::IpcError` and `ethers_providers::QuorumError`
+  [1012](https://github.com/gakonst/ethers-rs/pull/1012)
+
 ### 0.6.0
 
 - re-export error types for `Http` and `Ws` providers in
@@ -120,11 +162,6 @@
   [595](https://github.com/gakonst/ethers-rs/pull/595)
 - Add support for `evm_snapshot` and `evm_revert` dev RPC methods.
   [640](https://github.com/gakonst/ethers-rs/pull/640)
-
-### Unreleased
-
-- Add support for basic and bearer authentication in http and non-wasm websockets.
-  [829](https://github.com/gakonst/ethers-rs/pull/829)
 
 ### 0.5.3
 
@@ -197,6 +234,9 @@
 ## ethers-middleware
 
 ### Unreleased
+
+- Ensure a consistent chain ID between a Signer and Provider in SignerMiddleware
+  [#1095](https://gakonst/ethers-rs/pull/1095)
 
 ### 0.6.0
 

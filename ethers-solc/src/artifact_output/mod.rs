@@ -1,19 +1,65 @@
 //! Output artifact handling
 
 use crate::{
-    artifacts::{CompactContract, CompactContractBytecode, Contract, FileToContractsMap},
-    contracts::VersionedContracts,
-    error::Result,
-    utils, HardhatArtifact, ProjectPathsConfig, SolcError,
+    artifacts::FileToContractsMap, contracts::VersionedContracts, error::Result, utils,
+    HardhatArtifact, ProjectPathsConfig, SolcError,
 };
 use ethers_core::{abi::Abi, types::Bytes};
 use semver::Version;
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
+    borrow::Cow,
     collections::btree_map::BTreeMap,
     fmt, fs, io,
     path::{Path, PathBuf},
 };
+
+mod configurable;
+use crate::artifacts::{
+    contract::{CompactContract, CompactContractBytecode, Contract},
+    BytecodeObject, CompactBytecode, CompactContractBytecodeCow, CompactDeployedBytecode,
+    SourceFile,
+};
+pub use configurable::*;
+
+/// Represents unique artifact metadata for identifying artifacts on output
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub struct ArtifactId {
+    /// `artifact` cache path
+    pub path: PathBuf,
+    pub name: String,
+    /// Original source file path
+    pub source: PathBuf,
+    /// `solc` version that produced this artifact
+    pub version: Version,
+}
+
+impl ArtifactId {
+    /// Returns a <filename>:<name> slug that identifies an artifact
+    ///
+    /// Note: This identifier is not necessarily unique. If two contracts have the same name, they
+    /// will share the same slug. For a unique identifier see [ArtifactId::identifier].
+    pub fn slug(&self) -> String {
+        format!("{}.json:{}", self.path.file_stem().unwrap().to_string_lossy(), self.name)
+    }
+
+    /// Returns a <source path>:<name> slug that uniquely identifies an artifact
+    pub fn identifier(&self) -> String {
+        format!("{}:{}", self.source.to_string_lossy(), self.name)
+    }
+
+    /// Returns a <filename><version>:<name> slug that identifies an artifact
+    pub fn slug_versioned(&self) -> String {
+        format!(
+            "{}.{}.{}.{}.json:{}",
+            self.path.file_stem().unwrap().to_string_lossy(),
+            self.version.major,
+            self.version.minor,
+            self.version.patch,
+            self.name
+        )
+    }
+}
 
 /// Represents an artifact file representing a [`crate::Contract`]
 #[derive(Debug, Clone, PartialEq)]
@@ -159,17 +205,19 @@ impl<T> Artifacts<T> {
     /// Returns an iterator over _all_ artifacts and `<file name:contract name>`
     pub fn into_artifacts<O: ArtifactOutput<Artifact = T>>(
         self,
-    ) -> impl Iterator<Item = (String, T)> {
-        self.0.into_values().flat_map(|contract_artifacts| {
-            contract_artifacts.into_iter().flat_map(|(_contract_name, artifacts)| {
-                artifacts.into_iter().filter_map(|artifact| {
+    ) -> impl Iterator<Item = (ArtifactId, T)> {
+        self.0.into_iter().flat_map(|(file, contract_artifacts)| {
+            contract_artifacts.into_iter().flat_map(move |(_contract_name, artifacts)| {
+                let source = PathBuf::from(file.clone());
+                artifacts.into_iter().filter_map(move |artifact| {
                     O::contract_name(&artifact.file).map(|name| {
                         (
-                            format!(
-                                "{}:{}",
-                                artifact.file.file_name().unwrap().to_string_lossy(),
-                                name
-                            ),
+                            ArtifactId {
+                                path: PathBuf::from(&artifact.file),
+                                name,
+                                source: source.clone(),
+                                version: artifact.version,
+                            },
                             artifact.artifact,
                         )
                     })
@@ -256,6 +304,29 @@ pub trait Artifact {
     /// Returns the contents of this type as a single tuple of abi, bytecode and deployed bytecode
     fn into_parts(self) -> (Option<Abi>, Option<Bytes>, Option<Bytes>);
 
+    /// Consumes the type and returns the [Abi]
+    fn into_abi(self) -> Option<Abi>
+    where
+        Self: Sized,
+    {
+        self.into_parts().0
+    }
+
+    /// Consumes the type and returns the `bytecode`
+    fn into_bytecode_bytes(self) -> Option<Bytes>
+    where
+        Self: Sized,
+    {
+        self.into_parts().1
+    }
+    /// Consumes the type and returns the `deployed bytecode`
+    fn into_deployed_bytecode_bytes(self) -> Option<Bytes>
+    where
+        Self: Sized,
+    {
+        self.into_parts().2
+    }
+
     /// Same as [`Self::into_parts()`] but returns `Err` if an element is `None`
     fn try_into_parts(self) -> Result<(Abi, Bytes, Bytes)>
     where
@@ -269,11 +340,67 @@ pub trait Artifact {
             deployed_bytecode.ok_or_else(|| SolcError::msg("deployed bytecode missing"))?,
         ))
     }
+
+    /// Returns the reference of container type for abi, compact bytecode and deployed bytecode if
+    /// available
+    fn get_contract_bytecode(&self) -> CompactContractBytecodeCow;
+
+    /// Returns the reference to the `bytecode`
+    fn get_bytecode(&self) -> Option<Cow<CompactBytecode>> {
+        self.get_contract_bytecode().bytecode
+    }
+
+    /// Returns the reference to the `bytecode` object
+    fn get_bytecode_object(&self) -> Option<Cow<BytecodeObject>> {
+        let val = match self.get_bytecode()? {
+            Cow::Borrowed(b) => Cow::Borrowed(&b.object),
+            Cow::Owned(b) => Cow::Owned(b.object),
+        };
+        Some(val)
+    }
+
+    /// Returns the bytes of the `bytecode` object
+    fn get_bytecode_bytes(&self) -> Option<Cow<Bytes>> {
+        let val = match self.get_bytecode_object()? {
+            Cow::Borrowed(b) => Cow::Borrowed(b.as_bytes()?),
+            Cow::Owned(b) => Cow::Owned(b.into_bytes()?),
+        };
+        Some(val)
+    }
+
+    /// Returns the reference to the `deployedBytecode`
+    fn get_deployed_bytecode(&self) -> Option<Cow<CompactDeployedBytecode>> {
+        self.get_contract_bytecode().deployed_bytecode
+    }
+
+    /// Returns the reference to the `bytecode` object
+    fn get_deployed_bytecode_object(&self) -> Option<Cow<BytecodeObject>> {
+        let val = match self.get_deployed_bytecode()? {
+            Cow::Borrowed(b) => Cow::Borrowed(&b.bytecode.as_ref()?.object),
+            Cow::Owned(b) => Cow::Owned(b.bytecode?.object),
+        };
+        Some(val)
+    }
+
+    /// Returns the bytes of the `deployed bytecode` object
+    fn get_deployed_bytecode_bytes(&self) -> Option<Cow<Bytes>> {
+        let val = match self.get_deployed_bytecode_object()? {
+            Cow::Borrowed(b) => Cow::Borrowed(b.as_bytes()?),
+            Cow::Owned(b) => Cow::Owned(b.into_bytes()?),
+        };
+        Some(val)
+    }
+
+    /// Returns the reference to the [Abi] if available
+    fn get_abi(&self) -> Option<Cow<Abi>> {
+        self.get_contract_bytecode().abi
+    }
 }
 
 impl<T> Artifact for T
 where
     T: Into<CompactContractBytecode> + Into<CompactContract>,
+    for<'a> &'a T: Into<CompactContractBytecodeCow<'a>>,
 {
     fn into_inner(self) -> (Option<Abi>, Option<Bytes>) {
         let artifact = self.into_compact_contract();
@@ -291,6 +418,10 @@ where
     fn into_parts(self) -> (Option<Abi>, Option<Bytes>, Option<Bytes>) {
         self.into_compact_contract().into_parts()
     }
+
+    fn get_contract_bytecode(&self) -> CompactContractBytecodeCow {
+        self.into()
+    }
 }
 
 /// Handler invoked with the output of `solc`
@@ -300,7 +431,7 @@ where
 /// this includes artifact file location and naming.
 ///
 /// Depending on the [`crate::Project`] contracts and their compatible versions,
-/// [`crate::ProjectCompiler::compile()`] may invoke different `solc` executables on the same
+/// The project compiler may invoke different `solc` executables on the same
 /// solidity file leading to multiple [`crate::CompilerOutput`]s for the same `.sol` file.
 /// In addition to the `solidity file` to `contract` relationship (1-N*)
 /// [`crate::VersionedContracts`] also tracks the `contract` to (`artifact` + `solc version`)
@@ -314,27 +445,38 @@ pub trait ArtifactOutput {
     /// This will be invoked with all aggregated contracts from (multiple) solc `CompilerOutput`.
     /// See [`crate::AggregatedCompilerOutput`]
     fn on_output(
+        &self,
         contracts: &VersionedContracts,
+        sources: &BTreeMap<String, SourceFile>,
         layout: &ProjectPathsConfig,
     ) -> Result<Artifacts<Self::Artifact>> {
-        let mut artifacts = Self::output_to_artifacts(contracts);
+        let mut artifacts = self.output_to_artifacts(contracts, sources);
         artifacts.join_all(&layout.artifacts);
         artifacts.write_all()?;
 
-        Self::write_extras(contracts, layout)?;
+        self.write_extras(contracts, layout)?;
 
         Ok(artifacts)
+    }
+
+    /// Write additional files for the contract
+    fn write_contract_extras(&self, contract: &Contract, file: &Path) -> Result<()> {
+        ExtraOutputFiles::all().write_extras(contract, file)
     }
 
     /// Writes additional files for the contracts if the included in the `Contract`, such as `ir`,
     /// `ewasm`, `iropt`.
     ///
-    /// By default, these fields are _not_ enabled in the [`crate::Settings`], see
-    /// [`crate::Settings::default_output_selection()`], and the respective fields of the
-    /// [`Contract`] will `None`. If they'll be manually added to the `output_selection`, then
-    /// we're also creating individual files for this output, such as `Greeter.iropt`,
-    /// `Gretter.ewasm`
-    fn write_extras(contracts: &VersionedContracts, layout: &ProjectPathsConfig) -> Result<()> {
+    /// By default, these fields are _not_ enabled in the [`crate::artifacts::Settings`], see
+    /// [`crate::artifacts::output_selection::OutputSelection::default_output_selection()`], and the
+    /// respective fields of the [`Contract`] will `None`. If they'll be manually added to the
+    /// `output_selection`, then we're also creating individual files for this output, such as
+    /// `Greeter.iropt`, `Gretter.ewasm`
+    fn write_extras(
+        &self,
+        contracts: &VersionedContracts,
+        layout: &ProjectPathsConfig,
+    ) -> Result<()> {
         for (file, contracts) in contracts.as_ref().iter() {
             for (name, versioned_contracts) in contracts {
                 for c in versioned_contracts {
@@ -347,30 +489,7 @@ pub trait ArtifactOutput {
                     let file = layout.artifacts.join(artifact_path);
                     utils::create_parent_dir_all(&file)?;
 
-                    if let Some(iropt) = &c.contract.ir_optimized {
-                        fs::write(&file.with_extension("iropt"), iropt)
-                            .map_err(|err| SolcError::io(err, file.with_extension("iropt")))?
-                    }
-
-                    if let Some(ir) = &c.contract.ir {
-                        fs::write(&file.with_extension("ir"), ir)
-                            .map_err(|err| SolcError::io(err, file.with_extension("ir")))?
-                    }
-
-                    if let Some(ewasm) = &c.contract.ewasm {
-                        fs::write(
-                            &file.with_extension("ewasm"),
-                            serde_json::to_vec_pretty(&ewasm)?,
-                        )
-                        .map_err(|err| SolcError::io(err, file.with_extension("ewasm")))?;
-                    }
-
-                    if let Some(evm) = &c.contract.evm {
-                        if let Some(asm) = &evm.assembly {
-                            fs::write(&file.with_extension("asm"), asm)
-                                .map_err(|err| SolcError::io(err, file.with_extension("asm")))?
-                        }
-                    }
+                    self.write_contract_extras(&c.contract, &file)?;
                 }
             }
         }
@@ -473,16 +592,28 @@ pub trait ArtifactOutput {
     /// Convert a contract to the artifact type
     ///
     /// This is the core conversion function that takes care of converting a `Contract` into the
-    /// associated `Artifact` type
-    fn contract_to_artifact(_file: &str, _name: &str, contract: Contract) -> Self::Artifact;
+    /// associated `Artifact` type.
+    /// The `SourceFile` is also provided
+    fn contract_to_artifact(
+        &self,
+        _file: &str,
+        _name: &str,
+        contract: Contract,
+        source_file: Option<&SourceFile>,
+    ) -> Self::Artifact;
 
     /// Convert the compiler output into a set of artifacts
     ///
     /// **Note:** This does only convert, but _NOT_ write the artifacts to disk, See
     /// [`Self::on_output()`]
-    fn output_to_artifacts(contracts: &VersionedContracts) -> Artifacts<Self::Artifact> {
+    fn output_to_artifacts(
+        &self,
+        contracts: &VersionedContracts,
+        sources: &BTreeMap<String, SourceFile>,
+    ) -> Artifacts<Self::Artifact> {
         let mut artifacts = ArtifactsMap::new();
         for (file, contracts) in contracts.as_ref().iter() {
+            let source_file = sources.get(file);
             let mut entries = BTreeMap::new();
             for (name, versioned_contracts) in contracts {
                 let mut contracts = Vec::with_capacity(versioned_contracts.len());
@@ -493,8 +624,13 @@ pub trait ArtifactOutput {
                     } else {
                         Self::output_file(file, name)
                     };
-                    let artifact =
-                        Self::contract_to_artifact(file, name, contract.contract.clone());
+
+                    let artifact = self.contract_to_artifact(
+                        file,
+                        name,
+                        contract.contract.clone(),
+                        source_file,
+                    );
 
                     contracts.push(ArtifactFile {
                         artifact,
@@ -511,40 +647,52 @@ pub trait ArtifactOutput {
     }
 }
 
-/// An Artifacts implementation that uses a compact representation
+/// An `Artifact` implementation that uses a compact representation
 ///
 /// Creates a single json artifact with
 /// ```json
 ///  {
 ///    "abi": [],
-///    "bin": "...",
-///    "runtime-bin": "..."
+///    "bytecode": {...},
+///    "deployedBytecode": {...}
 ///  }
 /// ```
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct MinimalCombinedArtifacts;
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+pub struct MinimalCombinedArtifacts {
+    _priv: (),
+}
 
 impl ArtifactOutput for MinimalCombinedArtifacts {
     type Artifact = CompactContractBytecode;
 
-    fn contract_to_artifact(_file: &str, _name: &str, contract: Contract) -> Self::Artifact {
+    fn contract_to_artifact(
+        &self,
+        _file: &str,
+        _name: &str,
+        contract: Contract,
+        _source_file: Option<&SourceFile>,
+    ) -> Self::Artifact {
         Self::Artifact::from(contract)
     }
 }
 
 /// An Artifacts handler implementation that works the same as `MinimalCombinedArtifacts` but also
 /// supports reading hardhat artifacts if an initial attempt to deserialize an artifact failed
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct MinimalCombinedArtifactsHardhatFallback;
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+pub struct MinimalCombinedArtifactsHardhatFallback {
+    _priv: (),
+}
 
 impl ArtifactOutput for MinimalCombinedArtifactsHardhatFallback {
     type Artifact = CompactContractBytecode;
 
     fn on_output(
+        &self,
         output: &VersionedContracts,
+        sources: &BTreeMap<String, SourceFile>,
         layout: &ProjectPathsConfig,
     ) -> Result<Artifacts<Self::Artifact>> {
-        MinimalCombinedArtifacts::on_output(output, layout)
+        MinimalCombinedArtifacts::default().on_output(output, sources, layout)
     }
 
     fn read_cached_artifact(path: impl AsRef<Path>) -> Result<Self::Artifact> {
@@ -561,8 +709,14 @@ impl ArtifactOutput for MinimalCombinedArtifactsHardhatFallback {
         }
     }
 
-    fn contract_to_artifact(file: &str, name: &str, contract: Contract) -> Self::Artifact {
-        MinimalCombinedArtifacts::contract_to_artifact(file, name, contract)
+    fn contract_to_artifact(
+        &self,
+        file: &str,
+        name: &str,
+        contract: Contract,
+        source_file: Option<&SourceFile>,
+    ) -> Self::Artifact {
+        MinimalCombinedArtifacts::default().contract_to_artifact(file, name, contract, source_file)
     }
 }
 

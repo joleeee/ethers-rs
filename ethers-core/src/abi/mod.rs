@@ -164,7 +164,7 @@ macro_rules! impl_abi_type_tuple {
 
         impl<$($ty, )+> AbiArrayType for ($($ty,)+) where
             $(
-                $ty: AbiArrayType,
+                $ty: AbiType,
             )+ {}
     }
 }
@@ -269,5 +269,23 @@ mod tests {
             ParamType::FixedArray(Box::new(ParamType::Uint(16)), 32),
             <[u16; 32]>::param_type()
         );
+    }
+
+    #[test]
+    fn abi_type_tuples_work() {
+        fn assert_abitype<T: AbiType>() {}
+        fn assert_abiarraytype<T: AbiArrayType>() {}
+
+        assert_abitype::<(u64, u64)>();
+        assert_abiarraytype::<(u64, u64)>();
+
+        assert_abitype::<(u8, u8)>();
+        assert_abiarraytype::<(u8, u8)>();
+
+        assert_abitype::<Vec<(u64, u64)>>();
+        assert_abiarraytype::<Vec<(u64, u64)>>();
+
+        assert_abitype::<Vec<(u8, u8)>>();
+        assert_abiarraytype::<Vec<(u8, u8)>>();
     }
 }

@@ -2,14 +2,14 @@
 
 use crate::{
     artifacts::{
-        Bytecode, BytecodeObject, CompactContract, CompactContractBytecode, Contract,
-        ContractBytecode, DeployedBytecode, Offsets,
+        bytecode::{Bytecode, BytecodeObject, DeployedBytecode},
+        contract::{CompactContract, CompactContractBytecode, Contract, ContractBytecode},
+        CompactContractBytecodeCow, LosslessAbi, Offsets,
     },
-    ArtifactOutput,
+    ArtifactOutput, SourceFile,
 };
-use ethers_core::abi::Abi;
 use serde::{Deserialize, Serialize};
-use std::collections::btree_map::BTreeMap;
+use std::{borrow::Cow, collections::btree_map::BTreeMap};
 
 const HH_ARTIFACT_VERSION: &str = "hh-sol-artifact-1";
 
@@ -24,7 +24,7 @@ pub struct HardhatArtifact {
     /// The source name of this contract in the workspace like `contracts/Greeter.sol`
     pub source_name: String,
     /// The contract's ABI
-    pub abi: Abi,
+    pub abi: LosslessAbi,
     /// A "0x"-prefixed hex string of the unlinked deployment bytecode. If the contract is not
     /// deployable, this has the string "0x"
     pub bytecode: Option<BytecodeObject>,
@@ -41,10 +41,21 @@ pub struct HardhatArtifact {
     pub deployed_link_references: BTreeMap<String, BTreeMap<String, Vec<Offsets>>>,
 }
 
+impl<'a> From<&'a HardhatArtifact> for CompactContractBytecodeCow<'a> {
+    fn from(artifact: &'a HardhatArtifact) -> Self {
+        let c: ContractBytecode = artifact.clone().into();
+        CompactContractBytecodeCow {
+            abi: Some(Cow::Borrowed(&artifact.abi.abi)),
+            bytecode: c.bytecode.map(|b| Cow::Owned(b.into())),
+            deployed_bytecode: c.deployed_bytecode.map(|b| Cow::Owned(b.into())),
+        }
+    }
+}
+
 impl From<HardhatArtifact> for CompactContract {
     fn from(artifact: HardhatArtifact) -> Self {
         CompactContract {
-            abi: Some(artifact.abi),
+            abi: Some(artifact.abi.abi),
             bin: artifact.bytecode,
             bin_runtime: artifact.deployed_bytecode,
         }
@@ -65,7 +76,7 @@ impl From<HardhatArtifact> for ContractBytecode {
             bcode.into()
         });
 
-        ContractBytecode { abi: Some(artifact.abi), bytecode, deployed_bytecode }
+        ContractBytecode { abi: Some(artifact.abi.abi), bytecode, deployed_bytecode }
     }
 }
 
@@ -78,13 +89,21 @@ impl From<HardhatArtifact> for CompactContractBytecode {
 }
 
 /// Hardhat style artifacts handler
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct HardhatArtifacts;
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
+pub struct HardhatArtifacts {
+    _priv: (),
+}
 
 impl ArtifactOutput for HardhatArtifacts {
     type Artifact = HardhatArtifact;
 
-    fn contract_to_artifact(file: &str, name: &str, contract: Contract) -> Self::Artifact {
+    fn contract_to_artifact(
+        &self,
+        file: &str,
+        name: &str,
+        contract: Contract,
+        _source_file: Option<&SourceFile>,
+    ) -> Self::Artifact {
         let (bytecode, link_references, deployed_bytecode, deployed_link_references) =
             if let Some(evm) = contract.evm {
                 let (deployed_bytecode, deployed_link_references) =

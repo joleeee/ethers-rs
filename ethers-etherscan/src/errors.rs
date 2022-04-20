@@ -1,17 +1,19 @@
-use ethers_core::types::Chain;
+use ethers_core::types::{Address, Chain};
 use std::env::VarError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EtherscanError {
-    #[error("chain {0} not supported")]
+    #[error("Chain {0} not supported")]
     ChainNotSupported(Chain),
-    #[error("contract execution call failed: {0}")]
+    #[error("Contract execution call failed: {0}")]
     ExecutionFailed(String),
-    #[error("tx receipt failed")]
+    #[error("Balance failed")]
+    BalanceFailed,
+    #[error("Transaction receipt failed")]
     TransactionReceiptFailed,
-    #[error("gas estimation failed")]
+    #[error("Gas estimation failed")]
     GasEstimationFailed,
-    #[error("bad status code {0}")]
+    #[error("Bad status code: {0}")]
     BadStatusCode(String),
     #[error(transparent)]
     EnvVarNotFound(#[from] VarError),
@@ -19,4 +21,14 @@ pub enum EtherscanError {
     Reqwest(#[from] reqwest::Error),
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
+    #[error("Contract source code not verified: {0}")]
+    ContractCodeNotVerified(Address),
+    #[error("Rate limit exceeded")]
+    RateLimitExceeded,
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error("Local networks (e.g. ganache, geth --dev) cannot be indexed by etherscan")]
+    LocalNetworksNotSupported,
+    #[error("Unknown error: {0}")]
+    Unknown(String),
 }

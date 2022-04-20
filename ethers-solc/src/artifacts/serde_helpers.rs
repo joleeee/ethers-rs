@@ -7,14 +7,7 @@ pub fn deserialize_bytes<'de, D>(d: D) -> std::result::Result<Bytes, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let value = String::deserialize(d)?;
-    if let Some(value) = value.strip_prefix("0x") {
-        hex::decode(value)
-    } else {
-        hex::decode(&value)
-    }
-    .map(Into::into)
-    .map_err(|e| serde::de::Error::custom(e.to_string()))
+    String::deserialize(d)?.parse::<Bytes>().map_err(|e| serde::de::Error::custom(e.to_string()))
 }
 
 pub fn deserialize_opt_bytes<'de, D>(d: D) -> std::result::Result<Option<Bytes>, D::Error>
@@ -73,6 +66,34 @@ pub mod json_string_opt {
             serde_json::from_str(&s).map_err(de::Error::custom).map(Some)
         } else {
             Ok(None)
+        }
+    }
+}
+
+/// serde support for string
+pub mod string_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &String, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if value.starts_with("0x") {
+            serializer.serialize_str(value.as_str())
+        } else {
+            serializer.serialize_str(&format!("0x{}", value))
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if let Some(rem) = value.strip_prefix("0x") {
+            Ok(rem.to_string())
+        } else {
+            Ok(value)
         }
     }
 }

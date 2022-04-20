@@ -42,6 +42,61 @@ impl Context {
         Ok((function_impls, call_structs))
     }
 
+    /// Returns all deploy (constructor) implementations
+    pub(crate) fn deployment_methods(&self) -> TokenStream {
+        if self.contract_bytecode.is_some() {
+            let ethers_core = ethers_core_crate();
+            let ethers_contract = ethers_contract_crate();
+
+            let abi_name = self.inline_abi_ident();
+            let get_abi = quote! {
+                #abi_name.clone()
+            };
+
+            let bytecode_name = self.inline_bytecode_ident();
+            let get_bytecode = quote! {
+                #bytecode_name.clone().into()
+            };
+
+            let deploy = quote! {
+                /// Constructs the general purpose `Deployer` instance based on the provided constructor arguments and sends it.
+                /// Returns a new instance of a deployer that returns an instance of this contract after sending the transaction
+                ///
+                /// Notes:
+                /// 1. If there are no constructor arguments, you should pass `()` as the argument.
+                /// 1. The default poll duration is 7 seconds.
+                /// 1. The default number of confirmations is 1 block.
+                ///
+                ///
+                /// # Example
+                ///
+                /// Generate contract bindings with `abigen!` and deploy a new contract instance.
+                ///
+                /// *Note*: this requires a `bytecode` and `abi` object in the `greeter.json` artifact.
+                ///
+                /// ```ignore
+                /// # async fn deploy<M: ethers::providers::Middleware>(client: ::std::sync::Arc<M>) {
+                ///     abigen!(Greeter,"../greeter.json");
+                ///
+                ///    let greeter_contract = Greeter::deploy(client, "Hello world!".to_string()).unwrap().send().await.unwrap();
+                ///    let msg = greeter_contract.greet().call().await.unwrap();
+                /// # }
+                /// ```
+                pub fn deploy<T: #ethers_core::abi::Tokenize >(client: ::std::sync::Arc<M>, constructor_args: T) -> Result<#ethers_contract::builders::ContractDeployer<M, Self>, #ethers_contract::ContractError<M>> {
+                   let factory = #ethers_contract::ContractFactory::new(#get_abi, #get_bytecode, client);
+                   let deployer = factory.deploy(constructor_args)?;
+                   let deployer = #ethers_contract::ContractDeployer::new(deployer);
+                   Ok(deployer)
+                }
+
+            };
+
+            return deploy
+        }
+
+        quote! {}
+    }
+
     /// Expands to the corresponding struct type based on the inputs of the given function
     fn expand_call_struct(
         &self,
@@ -161,7 +216,7 @@ impl Context {
 
     /// The name ident of the calls enum
     fn expand_calls_enum_name(&self) -> Ident {
-        util::ident(&format!("{}Calls", self.contract_name))
+        util::ident(&format!("{}Calls", self.contract_ident))
     }
 
     /// Expands to the `name : type` pairs of the function's inputs
@@ -342,7 +397,7 @@ impl Context {
         let mut all_functions = HashMap::new();
         for function in self.abi.functions() {
             all_functions
-                .entry(function.name.to_lowercase())
+                .entry(util::safe_snake_case_ident(&function.name))
                 .or_insert_with(Vec::new)
                 .push(function);
         }
@@ -558,7 +613,7 @@ fn expand_function_name(function: &Function, alias: Option<&MethodAlias>) -> Ide
     if let Some(alias) = alias {
         alias.function_name.clone()
     } else {
-        util::safe_ident(&function.name.to_snake_case())
+        util::safe_ident(&util::safe_snake_case(&function.name))
     }
 }
 
@@ -567,7 +622,7 @@ fn expand_call_struct_name(function: &Function, alias: Option<&MethodAlias>) -> 
     let name = if let Some(alias) = alias {
         format!("{}Call", alias.struct_name)
     } else {
-        format!("{}Call", function.name.to_pascal_case())
+        format!("{}Call", util::safe_pascal_case(&function.name))
     };
     util::ident(&name)
 }
@@ -577,7 +632,7 @@ fn expand_call_struct_variant_name(function: &Function, alias: Option<&MethodAli
     if let Some(alias) = alias {
         alias.struct_name.clone()
     } else {
-        util::safe_ident(&function.name.to_pascal_case())
+        util::safe_ident(&util::safe_pascal_case(&function.name))
     }
 }
 

@@ -5,7 +5,7 @@ use ethers_core::{
     abi::{AbiDecode, AbiEncode, Address, Tokenizable},
     types::{transaction::eip2718::TypedTransaction, Eip1559TransactionRequest, U256},
 };
-use ethers_providers::Provider;
+use ethers_providers::{MockProvider, Provider};
 use ethers_solc::Solc;
 use std::{convert::TryFrom, sync::Arc};
 
@@ -375,6 +375,23 @@ fn can_handle_unique_underscore_functions() {
 }
 
 #[test]
+fn can_handle_underscore_numeric() {
+    abigen!(
+        Test,
+        r#"[
+            _100pct(string)
+        ]"#
+    );
+    let _call = _100PctCall("message".to_string());
+
+    let provider = Arc::new(Provider::new(MockProvider::new()));
+    let contract = Test::new(Address::default(), Arc::clone(&provider));
+    // NOTE: this seems to be weird behaviour of `Inflector::to_snake_case` which turns "100pct" ->
+    // "10_0pct"
+    let _call = contract._10_0pct("hello".to_string());
+}
+
+#[test]
 fn can_handle_duplicates_with_same_name() {
     abigen!(
         ConsoleLog,
@@ -428,6 +445,23 @@ fn can_generate_nested_types() {
 }
 
 #[test]
+fn can_handle_different_calls() {
+    abigen!(
+        Test,
+        r#"[
+        function fooBar()
+        function FOO_BAR()
+    ]"#,
+    );
+
+    let (client, _mock) = Provider::mocked();
+    let contract = Test::new(Address::default(), Arc::new(client));
+
+    let _ = contract.fooBar();
+    let _ = contract.FOO_BAR();
+}
+
+#[test]
 fn can_handle_case_sensitive_calls() {
     abigen!(
         StakedOHM,
@@ -442,6 +476,24 @@ fn can_handle_case_sensitive_calls() {
 
     let _ = contract.index();
     let _ = contract.INDEX();
+}
+
+#[tokio::test]
+async fn can_deploy_greeter() {
+    abigen!(Greeter, "ethers-contract/tests/solidity-contracts/greeter.json",);
+    let ganache = ethers_core::utils::Ganache::new().spawn();
+    let from = ganache.addresses()[0];
+    let provider = Provider::try_from(ganache.endpoint())
+        .unwrap()
+        .with_sender(from)
+        .interval(std::time::Duration::from_millis(10));
+    let client = Arc::new(provider);
+
+    let greeter_contract =
+        Greeter::deploy(client, "Hello World!".to_string()).unwrap().legacy().send().await.unwrap();
+
+    let greeting = greeter_contract.greet().call().await.unwrap();
+    assert_eq!("Hello World!", greeting);
 }
 
 #[tokio::test]
@@ -471,4 +523,28 @@ async fn can_abiencoderv2_output() {
 
     let res = contract.default_person().call().await.unwrap();
     assert_eq!(res, person);
+}
+
+#[test]
+fn can_gen_multi_etherscan() {
+    abigen!(
+        MyContract, "etherscan:0xdAC17F958D2ee523a2206206994597C13D831ec7";
+        MyContract2, "etherscan:0x8418bb725b3ac45ec8fff3791dd8b4e0480cc2a2";
+    );
+
+    let provider = Arc::new(Provider::new(MockProvider::new()));
+    let _contract = MyContract::new(Address::default(), Arc::clone(&provider));
+    let _contract = MyContract2::new(Address::default(), provider);
+}
+
+#[test]
+fn can_gen_reserved_word_field_names() {
+    abigen!(
+        Test,
+        r#"[
+        struct Foo { uint256 ref; }
+    ]"#,
+    );
+
+    let _foo = Foo { ref_: U256::default() };
 }

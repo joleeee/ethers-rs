@@ -2,7 +2,7 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use core::convert::TryFrom;
-use std::{fmt, str::FromStr};
+use std::{default, fmt, str::FromStr};
 
 use crate::types::U256;
 
@@ -22,6 +22,7 @@ pub enum Chain {
     XDai = 100,
     Polygon = 137,
     Fantom = 250,
+    Dev = 1337,
     FantomTestnet = 4002,
     PolygonMumbai = 80001,
     Avalanche = 43114,
@@ -36,6 +37,8 @@ pub enum Chain {
     BinanceSmartChainTestnet = 97,
     Arbitrum = 42161,
     ArbitrumTestnet = 421611,
+    Cronos = 25,
+    CronosTestnet = 338,
 }
 
 impl fmt::Display for Chain {
@@ -58,11 +61,14 @@ impl fmt::Display for Chain {
             Chain::Optimism => "optimism",
             Chain::OptimismKovan => "optimism-kovan",
             Chain::Fantom => "fantom",
+            Chain::Dev => "dev",
             Chain::FantomTestnet => "fantom-testnet",
             Chain::BinanceSmartChain => "bsc",
             Chain::BinanceSmartChainTestnet => "bsc-testnet",
             Chain::Arbitrum => "arbitrum",
             Chain::ArbitrumTestnet => "arbitrum-testnet",
+            Chain::Cronos => "cronos",
+            Chain::CronosTestnet => "cronos-testnet",
         };
 
         write!(formatter, "{}", chain)
@@ -99,6 +105,9 @@ impl TryFrom<u64> for Chain {
             42 => Chain::Kovan,
             100 => Chain::XDai,
             137 => Chain::Polygon,
+            1337 => Chain::Dev,
+            250 => Chain::Fantom,
+            4002 => Chain::FantomTestnet,
             80001 => Chain::PolygonMumbai,
             43114 => Chain::Avalanche,
             43113 => Chain::AvalancheFuji,
@@ -112,6 +121,8 @@ impl TryFrom<u64> for Chain {
             97 => Chain::BinanceSmartChainTestnet,
             42161 => Chain::Arbitrum,
             421611 => Chain::ArbitrumTestnet,
+            25 => Chain::Cronos,
+            338 => Chain::CronosTestnet,
             _ => return Err(ParseChainError(chain.to_string())),
         })
     }
@@ -139,10 +150,13 @@ impl FromStr for Chain {
             "optimism-kovan" => Chain::OptimismKovan,
             "fantom" => Chain::Fantom,
             "fantom-testnet" => Chain::FantomTestnet,
+            "dev" => Chain::Dev,
             "bsc" => Chain::BinanceSmartChain,
             "bsc-testnet" => Chain::BinanceSmartChainTestnet,
             "arbitrum" => Chain::Arbitrum,
             "arbitrum-testnet" => Chain::ArbitrumTestnet,
+            "cronos" => Chain::Cronos,
+            "cronos-testnet" => Chain::CronosTestnet,
             _ => return Err(ParseChainError(chain.to_owned())),
         })
     }
@@ -162,7 +176,19 @@ impl Chain {
                 Chain::BinanceSmartChain |
                 Chain::BinanceSmartChainTestnet |
                 Chain::Arbitrum |
-                Chain::ArbitrumTestnet,
+                Chain::ArbitrumTestnet |
+                Chain::Cronos,
         )
     }
+}
+
+impl default::Default for Chain {
+    fn default() -> Self {
+        Chain::Mainnet
+    }
+}
+
+#[test]
+fn test_default_chain() {
+    assert_eq!(Chain::default(), Chain::Mainnet);
 }

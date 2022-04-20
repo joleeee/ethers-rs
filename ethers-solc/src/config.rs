@@ -7,15 +7,17 @@ use crate::{
     utils, Source, Sources,
 };
 
+use crate::artifacts::output_selection::ContractOutputSelection;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{BTreeSet, HashSet},
     fmt::{self, Formatter},
     fs,
     path::{Component, Path, PathBuf},
 };
 
 /// Where to find all files or where to write them
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectPathsConfig {
     /// Project root
     pub root: PathBuf,
@@ -56,6 +58,25 @@ impl ProjectPathsConfig {
     /// Creates a new config with the current directory as the root
     pub fn current_dapptools() -> Result<Self> {
         Self::dapptools(std::env::current_dir().map_err(|err| SolcError::io(err, "."))?)
+    }
+
+    /// Returns a new [ProjectPaths] instance that contains all directories configured for this
+    /// project
+    pub fn paths(&self) -> ProjectPaths {
+        ProjectPaths {
+            artifacts: self.artifacts.clone(),
+            sources: self.sources.clone(),
+            tests: self.tests.clone(),
+            libraries: self.libraries.iter().cloned().collect(),
+        }
+    }
+
+    /// Same as [Self::paths()] but strips the `root` form all paths,
+    /// [ProjectPaths::strip_prefix_all()]
+    pub fn paths_relative(&self) -> ProjectPaths {
+        let mut paths = self.paths();
+        paths.strip_prefix_all(&self.root);
+        paths
     }
 
     /// Creates all configured dirs and files
@@ -165,12 +186,13 @@ impl ProjectPathsConfig {
     ///
     /// `import "@openzeppelin/token/ERC20/IERC20.sol";`
     ///
-    /// There is no strict rule behind this, but because [`Remappings::find_many`] returns
-    /// `'@openzeppelin/=node_modules/@openzeppelin/contracts/'` we should handle the case if the
-    /// remapping path ends with `contracts` and the import path starts with `<remapping
-    /// name>/contracts`. Otherwise we can end up with a resolved path that has a duplicate
-    /// `contracts` segment: `@openzeppelin/contracts/contracts/token/ERC20/IERC20.sol` we check
-    /// for this edge case here so that both styles work out of the box.
+    /// There is no strict rule behind this, but because [`crate::remappings::Remapping::find_many`]
+    /// returns `'@openzeppelin/=node_modules/@openzeppelin/contracts/'` we should handle the
+    /// case if the remapping path ends with `contracts` and the import path starts with
+    /// `<remapping name>/contracts`. Otherwise we can end up with a resolved path that has a
+    /// duplicate `contracts` segment:
+    /// `@openzeppelin/contracts/contracts/token/ERC20/IERC20.sol` we check for this edge case
+    /// here so that both styles work out of the box.
     pub fn resolve_library_import(&self, import: &Path) -> Option<PathBuf> {
         // if the import path starts with the name of the remapping then we get the resolved path by
         // removing the name and adding the remainder to the path of the remapping
@@ -228,7 +250,7 @@ impl ProjectPathsConfig {
     pub fn flatten(&self, target: &Path) -> Result<String> {
         tracing::trace!("flattening file");
         let graph = Graph::resolve(self)?;
-        self.flatten_node(target, &graph, &mut vec![], false, false)
+        self.flatten_node(target, &graph, &mut Default::default(), false, false, false)
     }
 
     /// Flattens a single node from the dependency graph
@@ -236,8 +258,9 @@ impl ProjectPathsConfig {
         &self,
         target: &Path,
         graph: &Graph,
-        imported: &mut Vec<usize>,
+        imported: &mut HashSet<usize>,
         strip_version_pragma: bool,
+        strip_experimental_pragma: bool,
         strip_license: bool,
     ) -> Result<String> {
         let target_dir = target.parent().ok_or_else(|| {
@@ -247,9 +270,11 @@ impl ProjectPathsConfig {
             SolcError::msg(format!("cannot resolve file at \"{:?}\"", target.display()))
         })?;
 
-        if imported.iter().any(|&idx| idx == *target_index) {
+        if imported.contains(target_index) {
+            // short circuit nodes that were already imported, if both A.sol and B.sol import C.sol
             return Ok(String::new())
         }
+        imported.insert(*target_index);
 
         let target_node = graph.node(*target_index);
 
@@ -275,20 +300,28 @@ impl ProjectPathsConfig {
             }
         }
 
+        if strip_experimental_pragma {
+            if let Some(experiment) = target_node.experimental() {
+                let (start, end) = experiment.loc_by_offset(offset);
+                content.splice(start..end, std::iter::empty());
+                offset -= (end - start) as isize;
+            }
+        }
+
         for import in imports.iter() {
             let import_path = self.resolve_import(target_dir, import.data())?;
-            let import_content = self.flatten_node(&import_path, graph, imported, true, true)?;
-            let import_content = import_content.trim().as_bytes().to_owned();
+            let s = self.flatten_node(&import_path, graph, imported, true, true, true)?;
+            let import_content = s.as_bytes();
             let import_content_len = import_content.len() as isize;
             let (start, end) = import.loc_by_offset(offset);
-            content.splice(start..end, import_content);
+            content.splice(start..end, import_content.iter().copied());
             offset += import_content_len - ((end - start) as isize);
         }
 
         let result = String::from_utf8(content).map_err(|err| {
             SolcError::msg(format!("failed to convert extended bytes to string: {}", err))
         })?;
-        imported.push(*target_index);
+        let result = utils::RE_THREE_OR_MORE_NEWLINES.replace_all(&result, "\n\n").into_owned();
 
         Ok(result)
     }
@@ -309,6 +342,61 @@ impl fmt::Display for ProjectPathsConfig {
             writeln!(f, "    {}", remapping)?;
         }
         Ok(())
+    }
+}
+
+/// This is a subset of [ProjectPathsConfig] that contains all relevant folders in the project
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProjectPaths {
+    pub artifacts: PathBuf,
+    pub sources: PathBuf,
+    pub tests: PathBuf,
+    pub libraries: BTreeSet<PathBuf>,
+}
+
+impl ProjectPaths {
+    /// Joins the folders' location with `root`
+    pub fn join_all(&mut self, root: impl AsRef<Path>) -> &mut Self {
+        let root = root.as_ref();
+        self.artifacts = root.join(&self.artifacts);
+        self.sources = root.join(&self.sources);
+        self.tests = root.join(&self.tests);
+        let libraries = std::mem::take(&mut self.libraries);
+        self.libraries.extend(libraries.into_iter().map(|p| root.join(p)));
+        self
+    }
+
+    /// Removes `base` from all folders
+    pub fn strip_prefix_all(&mut self, base: impl AsRef<Path>) -> &mut Self {
+        let base = base.as_ref();
+
+        if let Ok(prefix) = self.artifacts.strip_prefix(base) {
+            self.artifacts = prefix.to_path_buf();
+        }
+        if let Ok(prefix) = self.sources.strip_prefix(base) {
+            self.sources = prefix.to_path_buf();
+        }
+        if let Ok(prefix) = self.tests.strip_prefix(base) {
+            self.tests = prefix.to_path_buf();
+        }
+        let libraries = std::mem::take(&mut self.libraries);
+        self.libraries.extend(
+            libraries
+                .into_iter()
+                .map(|p| p.strip_prefix(base).map(|p| p.to_path_buf()).unwrap_or(p)),
+        );
+        self
+    }
+}
+
+impl Default for ProjectPaths {
+    fn default() -> Self {
+        Self {
+            artifacts: "out".into(),
+            sources: "src".into(),
+            tests: "tests".into(),
+            libraries: Default::default(),
+        }
     }
 }
 
@@ -465,9 +553,18 @@ impl SolcConfig {
     }
 }
 
+impl From<SolcConfig> for Settings {
+    fn from(config: SolcConfig) -> Self {
+        config.settings
+    }
+}
+
 #[derive(Default)]
 pub struct SolcConfigBuilder {
     settings: Option<Settings>,
+
+    /// additionally selected outputs that should be included in the `Contract` that `solc´ creates
+    output_selection: Vec<ContractOutputSelection>,
 }
 
 impl SolcConfigBuilder {
@@ -476,12 +573,34 @@ impl SolcConfigBuilder {
         self
     }
 
+    /// Adds another `ContractOutputSelection` to the set
+    #[must_use]
+    pub fn additional_output(mut self, output: impl Into<ContractOutputSelection>) -> Self {
+        self.output_selection.push(output.into());
+        self
+    }
+
+    /// Adds multiple `ContractOutputSelection` to the set
+    #[must_use]
+    pub fn additional_outputs<I, S>(mut self, outputs: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<ContractOutputSelection>,
+    {
+        for out in outputs {
+            self = self.additional_output(out);
+        }
+        self
+    }
+
     /// Creates the solc config
     ///
     /// If no solc version is configured then it will be determined by calling `solc --version`.
     pub fn build(self) -> SolcConfig {
-        let Self { settings } = self;
-        SolcConfig { settings: settings.unwrap_or_default() }
+        let Self { settings, output_selection } = self;
+        let mut settings = settings.unwrap_or_default();
+        settings.push_all(output_selection);
+        SolcConfig { settings }
     }
 }
 

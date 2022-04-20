@@ -22,7 +22,7 @@ macro_rules! if_not_wasm {
 #[cfg(all(target_family = "unix", feature = "ipc"))]
 mod ipc;
 #[cfg(all(target_family = "unix", feature = "ipc"))]
-pub use ipc::Ipc;
+pub use ipc::{Ipc, IpcError};
 
 mod http;
 pub use self::http::{ClientError as HttpClientError, Provider as Http};
@@ -34,7 +34,10 @@ pub use ws::{ClientError as WsClientError, Ws};
 
 mod quorum;
 pub(crate) use quorum::JsonRpcClientWrapper;
-pub use quorum::{Quorum, QuorumProvider, WeightedProvider};
+pub use quorum::{Quorum, QuorumError, QuorumProvider, WeightedProvider};
+
+mod rw;
+pub use rw::{RwClient, RwClientError};
 
 mod mock;
 pub use mock::{MockError, MockProvider};
