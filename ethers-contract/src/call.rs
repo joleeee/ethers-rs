@@ -87,6 +87,7 @@ impl<M, D> Clone for ContractCall<M, D> {
             block: self.block,
             client: self.client.clone(),
             datatype: self.datatype,
+            state_override: None,
         }
     }
 }
