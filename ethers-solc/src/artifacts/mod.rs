@@ -11,10 +11,15 @@ use std::{
     str::FromStr,
 };
 
-use crate::{compile::*, error::SolcIoError, remappings::Remapping, utils};
+use crate::{
+    compile::*, error::SolcIoError, remappings::Remapping, utils, ProjectPathsConfig, SolcError,
+};
 
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
+use tracing::warn;
 
+pub mod ast;
+pub use ast::*;
 pub mod bytecode;
 pub mod contract;
 pub mod output_selection;
@@ -41,10 +46,12 @@ pub type Contracts = FileToContractsMap<Contract>;
 pub type Sources = BTreeMap<PathBuf, Source>;
 
 /// A set of different Solc installations with their version and the sources to be compiled
-pub type VersionedSources = BTreeMap<Solc, (Version, Sources)>;
+pub(crate) type VersionedSources = BTreeMap<Solc, (Version, Sources)>;
 
 /// A set of different Solc installations with their version and the sources to be compiled
-pub type VersionedFilteredSources = BTreeMap<Solc, (Version, FilteredSources)>;
+pub(crate) type VersionedFilteredSources = BTreeMap<Solc, (Version, FilteredSources)>;
+
+const SOLIDITY: &str = "Solidity";
 
 /// Input type `solc` expects
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,7 +84,7 @@ impl CompilerInput {
         let mut res = Vec::new();
         if !solidity_sources.is_empty() {
             res.push(Self {
-                language: "Solidity".to_string(),
+                language: SOLIDITY.to_string(),
                 sources: solidity_sources,
                 settings: Default::default(),
             });
@@ -97,6 +104,8 @@ impl CompilerInput {
     pub fn sanitized(mut self, version: &Version) -> Self {
         static PRE_V0_6_0: once_cell::sync::Lazy<VersionReq> =
             once_cell::sync::Lazy::new(|| VersionReq::parse("<0.6.0").unwrap());
+        static PRE_V0_8_10: once_cell::sync::Lazy<VersionReq> =
+            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.8.10").unwrap());
 
         if PRE_V0_6_0.matches(version) {
             if let Some(ref mut meta) = self.settings.metadata {
@@ -104,7 +113,21 @@ impl CompilerInput {
                 // missing in <https://docs.soliditylang.org/en/v0.5.17/using-the-compiler.html#compiler-api>
                 meta.bytecode_hash.take();
             }
+            // introduced in <https://docs.soliditylang.org/en/v0.6.0/using-the-compiler.html#compiler-api>
+            let _ = self.settings.debug.take();
         }
+
+        if PRE_V0_8_10.matches(version) {
+            if let Some(ref mut debug) = self.settings.debug {
+                // introduced in <https://docs.soliditylang.org/en/v0.8.10/using-the-compiler.html#compiler-api>
+                // <https://github.com/ethereum/solidity/releases/tag/v0.8.10>
+                debug.debug_info.clear();
+            }
+
+            // 0.8.10 is the earliest version that has all model checker options.
+            self.settings.model_checker = None;
+        }
+
         self
     }
 
@@ -165,6 +188,52 @@ impl CompilerInput {
     }
 }
 
+/// A `CompilerInput` representation used for verify
+///
+/// This type is an alternative `CompilerInput` but uses non-alphabetic ordering of the `sources`
+/// and instead emits the (Path -> Source) path in the same order as the pairs in the `sources`
+/// `Vec`. This is used over a map, so we can determine the order in which etherscan will display
+/// the verified contracts
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StandardJsonCompilerInput {
+    pub language: String,
+    #[serde(with = "serde_helpers::tuple_vec_map")]
+    pub sources: Vec<(PathBuf, Source)>,
+    pub settings: Settings,
+}
+
+// === impl StandardJsonCompilerInput ===
+
+impl StandardJsonCompilerInput {
+    pub fn new(sources: Vec<(PathBuf, Source)>, settings: Settings) -> Self {
+        Self { language: SOLIDITY.to_string(), sources, settings }
+    }
+
+    /// Normalizes the EVM version used in the settings to be up to the latest one
+    /// supported by the provided compiler version.
+    #[must_use]
+    pub fn normalize_evm_version(mut self, version: &Version) -> Self {
+        if let Some(ref mut evm_version) = self.settings.evm_version {
+            self.settings.evm_version = evm_version.normalize_version(version);
+        }
+        self
+    }
+}
+
+impl From<StandardJsonCompilerInput> for CompilerInput {
+    fn from(input: StandardJsonCompilerInput) -> Self {
+        let StandardJsonCompilerInput { language, sources, settings } = input;
+        CompilerInput { language, sources: sources.into_iter().collect(), settings }
+    }
+}
+
+impl From<CompilerInput> for StandardJsonCompilerInput {
+    fn from(input: CompilerInput) -> Self {
+        let CompilerInput { language, sources, settings } = input;
+        StandardJsonCompilerInput { language, sources: sources.into_iter().collect(), settings }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -175,6 +244,9 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remappings: Vec<Remapping>,
     pub optimizer: Optimizer,
+    /// Model Checker options.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_checker: Option<ModelCheckerSettings>,
     /// Metadata settings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<SettingsMetadata>,
@@ -194,8 +266,17 @@ pub struct Settings {
     /// false by default.
     #[serde(rename = "viaIR", default, skip_serializing_if = "Option::is_none")]
     pub via_ir: Option<bool>,
-    #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
-    pub libraries: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<DebuggingSettings>,
+    /// Addresses of the libraries. If not all libraries are given here,
+    /// it can result in unlinked objects whose output data is different.
+    ///
+    /// The top level key is the name of the source file where the library is used.
+    /// If remappings are used, this source file should match the global path
+    /// after remappings were applied.
+    /// If this key is an empty string, that refers to a global level.
+    #[serde(default, skip_serializing_if = "Libraries::is_empty")]
+    pub libraries: Libraries,
 }
 
 impl Settings {
@@ -308,10 +389,107 @@ impl Default for Settings {
             output_selection: OutputSelection::default_output_selection(),
             evm_version: Some(EvmVersion::default()),
             via_ir: None,
+            debug: None,
             libraries: Default::default(),
             remappings: Default::default(),
+            model_checker: None,
         }
         .with_ast()
+    }
+}
+
+/// A wrapper type for all libraries in the form of `<file>:<lib>:<addr>`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct Libraries {
+    /// All libraries, `(file path -> (Lib name -> Address))
+    pub libs: BTreeMap<PathBuf, BTreeMap<String, String>>,
+}
+
+// === impl Libraries ===
+
+impl Libraries {
+    /// Parses all libraries in the form of
+    /// `<file>:<lib>:<addr>`
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ethers_solc::artifacts::Libraries;
+    /// let libs = Libraries::parse(&[
+    ///     "src/DssSpell.sol:DssExecLib:0xfD88CeE74f7D78697775aBDAE53f9Da1559728E4".to_string(),
+    /// ])
+    /// .unwrap();
+    /// ```
+    pub fn parse(libs: &[String]) -> Result<Self, SolcError> {
+        let mut libraries = BTreeMap::default();
+        for lib in libs {
+            let mut items = lib.split(':');
+            let file = items.next().ok_or_else(|| {
+                SolcError::msg(format!("failed to parse path to library file: {}", lib))
+            })?;
+            let lib = items
+                .next()
+                .ok_or_else(|| SolcError::msg(format!("failed to parse library name: {}", lib)))?;
+            let addr = items.next().ok_or_else(|| {
+                SolcError::msg(format!("failed to parse library address: {}", lib))
+            })?;
+            if items.next().is_some() {
+                return Err(SolcError::msg(format!(
+                    "failed to parse, too many arguments passed: {}",
+                    lib
+                )))
+            }
+            libraries
+                .entry(file.into())
+                .or_insert_with(BTreeMap::default)
+                .insert(lib.to_string(), addr.to_string());
+        }
+        Ok(Self { libs: libraries })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.libs.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.libs.len()
+    }
+
+    /// Solc expects the lib paths to match the global path after remappings were applied
+    ///
+    /// See also [ProjectPathsConfig::resolve_import]
+    pub fn with_applied_remappings(mut self, config: &ProjectPathsConfig) -> Self {
+        self.libs = self
+            .libs
+            .into_iter()
+            .map(|(file, target)| {
+                let file = config.resolve_import(&config.root, &file).unwrap_or_else(|err| {
+                    warn!(target: "libs", "Failed to resolve library `{}` for linking: {:?}", file.display(), err);
+                    file
+                });
+                (file, target)
+            })
+            .collect();
+        self
+    }
+}
+
+impl From<BTreeMap<PathBuf, BTreeMap<String, String>>> for Libraries {
+    fn from(libs: BTreeMap<PathBuf, BTreeMap<String, String>>) -> Self {
+        Self { libs }
+    }
+}
+
+impl AsRef<BTreeMap<PathBuf, BTreeMap<String, String>>> for Libraries {
+    fn as_ref(&self) -> &BTreeMap<PathBuf, BTreeMap<String, String>> {
+        &self.libs
+    }
+}
+
+impl AsMut<BTreeMap<PathBuf, BTreeMap<String, String>>> for Libraries {
+    fn as_mut(&mut self) -> &mut BTreeMap<PathBuf, BTreeMap<String, String>> {
+        &mut self.libs
     }
 }
 
@@ -483,6 +661,80 @@ impl FromStr for EvmVersion {
         }
     }
 }
+
+/// Debugging settings for solc
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebuggingSettings {
+    #[serde(
+        default,
+        with = "serde_helpers::display_from_str_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub revert_strings: Option<RevertStrings>,
+    ///How much extra debug information to include in comments in the produced EVM assembly and
+    /// Yul code.
+    /// Available components are:
+    // - `location`: Annotations of the form `@src <index>:<start>:<end>` indicating the location of
+    //   the corresponding element in the original Solidity file, where:
+    //     - `<index>` is the file index matching the `@use-src` annotation,
+    //     - `<start>` is the index of the first byte at that location,
+    //     - `<end>` is the index of the first byte after that location.
+    // - `snippet`: A single-line code snippet from the location indicated by `@src`. The snippet is
+    //   quoted and follows the corresponding `@src` annotation.
+    // - `*`: Wildcard value that can be used to request everything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debug_info: Vec<String>,
+}
+
+/// How to treat revert (and require) reason strings.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RevertStrings {
+    /// "default" does not inject compiler-generated revert strings and keeps user-supplied ones.
+    Default,
+    /// "strip" removes all revert strings (if possible, i.e. if literals are used) keeping
+    /// side-effects
+    Strip,
+    /// "debug" injects strings for compiler-generated internal reverts, implemented for ABI
+    /// encoders V1 and V2 for now.
+    Debug,
+    /// "verboseDebug" even appends further information to user-supplied revert strings (not yet
+    /// implemented)
+    VerboseDebug,
+}
+
+impl fmt::Display for RevertStrings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let string = match self {
+            RevertStrings::Default => "default",
+            RevertStrings::Strip => "strip",
+            RevertStrings::Debug => "debug",
+            RevertStrings::VerboseDebug => "verboseDebug",
+        };
+        write!(f, "{}", string)
+    }
+}
+
+impl FromStr for RevertStrings {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "default" => Ok(RevertStrings::Default),
+            "strip" => Ok(RevertStrings::Strip),
+            "debug" => Ok(RevertStrings::Debug),
+            "verboseDebug" | "verbosedebug" => Ok(RevertStrings::VerboseDebug),
+            s => Err(format!("Unknown evm version: {}", s)),
+        }
+    }
+}
+
+impl Default for RevertStrings {
+    fn default() -> Self {
+        RevertStrings::Default
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsMetadata {
     /// Use only literal content and not URLs (false by default)
@@ -592,6 +844,112 @@ pub struct MetadataSource {
     pub license: Option<String>,
 }
 
+/// Model checker settings for solc
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCheckerSettings {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub contracts: BTreeMap<String, Vec<String>>,
+    #[serde(
+        default,
+        with = "serde_helpers::display_from_str_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub engine: Option<ModelCheckerEngine>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<ModelCheckerTarget>>,
+}
+
+/// Which model checker engine to run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelCheckerEngine {
+    Default,
+    All,
+    BMC,
+    CHC,
+}
+
+impl fmt::Display for ModelCheckerEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let string = match self {
+            ModelCheckerEngine::Default => "none",
+            ModelCheckerEngine::All => "all",
+            ModelCheckerEngine::BMC => "bmc",
+            ModelCheckerEngine::CHC => "chc",
+        };
+        write!(f, "{}", string)
+    }
+}
+
+impl FromStr for ModelCheckerEngine {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(ModelCheckerEngine::Default),
+            "all" => Ok(ModelCheckerEngine::All),
+            "bmc" => Ok(ModelCheckerEngine::BMC),
+            "chc" => Ok(ModelCheckerEngine::CHC),
+            s => Err(format!("Unknown model checker engine: {}", s)),
+        }
+    }
+}
+
+impl Default for ModelCheckerEngine {
+    fn default() -> Self {
+        ModelCheckerEngine::Default
+    }
+}
+
+/// Which model checker targets to check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelCheckerTarget {
+    Assert,
+    Underflow,
+    Overflow,
+    DivByZero,
+    ConstantCondition,
+    PopEmptyArray,
+    OutOfBounds,
+    Balance,
+}
+
+impl fmt::Display for ModelCheckerTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let string = match self {
+            ModelCheckerTarget::Assert => "assert",
+            ModelCheckerTarget::Underflow => "underflow",
+            ModelCheckerTarget::Overflow => "overflow",
+            ModelCheckerTarget::DivByZero => "divByZero",
+            ModelCheckerTarget::ConstantCondition => "constantCondition",
+            ModelCheckerTarget::PopEmptyArray => "popEmptyArray",
+            ModelCheckerTarget::OutOfBounds => "outOfBounds",
+            ModelCheckerTarget::Balance => "balance",
+        };
+        write!(f, "{}", string)
+    }
+}
+
+impl FromStr for ModelCheckerTarget {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "assert" => Ok(ModelCheckerTarget::Assert),
+            "underflow" => Ok(ModelCheckerTarget::Underflow),
+            "overflow" => Ok(ModelCheckerTarget::Overflow),
+            "divByZero" => Ok(ModelCheckerTarget::DivByZero),
+            "constantCondition" => Ok(ModelCheckerTarget::ConstantCondition),
+            "popEmptyArray" => Ok(ModelCheckerTarget::PopEmptyArray),
+            "outOfBounds" => Ok(ModelCheckerTarget::OutOfBounds),
+            "balance" => Ok(ModelCheckerTarget::Balance),
+            s => Err(format!("Unknown model checker target: {}", s)),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Compiler {
     pub version: String,
@@ -621,7 +979,7 @@ pub struct SolcAbi {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     #[serde(rename = "internalType")]
-    pub internal_type: String,
+    pub internal_type: Option<String>,
     pub name: String,
     #[serde(rename = "type")]
     pub put_type: String,
@@ -632,13 +990,13 @@ pub struct Doc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub methods: Option<Libraries>,
+    pub methods: Option<DocLibraries>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct Libraries {
+pub struct DocLibraries {
     #[serde(flatten)]
     pub libs: BTreeMap<String, serde_json::Value>,
 }
@@ -941,7 +1299,13 @@ pub struct UserDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
-    pub methods: BTreeMap<String, BTreeMap<String, String>>,
+    pub methods: BTreeMap<String, MethodNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+pub struct MethodNotice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
 }
@@ -1143,8 +1507,18 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(msg) = &self.formatted_message {
             match self.severity {
-                Severity::Error => msg.as_str().red().fmt(f),
-                Severity::Warning | Severity::Info => msg.as_str().yellow().fmt(f),
+                Severity::Error => {
+                    if let Some(code) = self.error_code {
+                        format!("error[{}]: ", code).as_str().red().fmt(f)?;
+                    }
+                    msg.as_str().red().fmt(f)
+                }
+                Severity::Warning | Severity::Info => {
+                    if let Some(code) = self.error_code {
+                        format!("warning[{}]: ", code).as_str().yellow().fmt(f)?;
+                    }
+                    msg.as_str().yellow().fmt(f)
+                }
             }
         } else {
             self.severity.fmt(f)?;
@@ -1254,8 +1628,8 @@ pub struct SecondarySourceLocation {
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct SourceFile {
     pub id: u32,
-    #[serde(default)]
-    pub ast: serde_json::Value,
+    #[serde(default, with = "serde_helpers::empty_json_object_opt")]
+    pub ast: Option<Ast>,
 }
 
 /// A wrapper type for a list of source files
@@ -1396,9 +1770,29 @@ mod tests {
 
         for path in fs::read_dir(dir).unwrap() {
             let path = path.unwrap().path();
-            let compiler_output = fs::read_to_string(&path).unwrap();
-            serde_json::from_str::<CompilerInput>(&compiler_output).unwrap_or_else(|err| {
-                panic!("Failed to read compiler output of {} {}", path.display(), err)
+            let compiler_input = fs::read_to_string(&path).unwrap();
+            serde_json::from_str::<CompilerInput>(&compiler_input).unwrap_or_else(|err| {
+                panic!("Failed to read compiler input of {} {}", path.display(), err)
+            });
+        }
+    }
+
+    #[test]
+    fn can_parse_standard_json_compiler_input() {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        dir.push("test-data/in");
+
+        for path in fs::read_dir(dir).unwrap() {
+            let path = path.unwrap().path();
+            let compiler_input = fs::read_to_string(&path).unwrap();
+            let val = serde_json::from_str::<StandardJsonCompilerInput>(&compiler_input)
+                .unwrap_or_else(|err| {
+                    panic!("Failed to read compiler output of {} {}", path.display(), err)
+                });
+
+            let pretty = serde_json::to_string_pretty(&val).unwrap();
+            serde_json::from_str::<CompilerInput>(&pretty).unwrap_or_else(|err| {
+                panic!("Failed to read converted compiler input of {} {}", path.display(), err)
             });
         }
     }
@@ -1454,5 +1848,72 @@ mod tests {
         let version: Version = "0.5.17".parse().unwrap();
         let i = input.sanitized(&version);
         assert!(i.settings.metadata.unwrap().bytecode_hash.is_none());
+    }
+
+    #[test]
+    fn can_parse_libraries() {
+        let libraries = ["./src/lib/LibraryContract.sol:Library:0xaddress".to_string()];
+
+        let libs = Libraries::parse(&libraries[..]).unwrap().libs;
+
+        assert_eq!(
+            libs,
+            BTreeMap::from([(
+                PathBuf::from("./src/lib/LibraryContract.sol"),
+                BTreeMap::from([("Library".to_string(), "0xaddress".to_string())])
+            )])
+        );
+    }
+
+    #[test]
+    fn can_parse_many_libraries() {
+        let libraries= [
+            "./src/SizeAuctionDiscount.sol:Chainlink:0xffedba5e171c4f15abaaabc86e8bd01f9b54dae5".to_string(),
+            "./src/SizeAuction.sol:ChainlinkTWAP:0xffedba5e171c4f15abaaabc86e8bd01f9b54dae5".to_string(),
+            "./src/SizeAuction.sol:Math:0x902f6cf364b8d9470d5793a9b2b2e86bddd21e0c".to_string(),
+            "./src/test/ChainlinkTWAP.t.sol:ChainlinkTWAP:0xffedba5e171c4f15abaaabc86e8bd01f9b54dae5".to_string(),
+            "./src/SizeAuctionDiscount.sol:Math:0x902f6cf364b8d9470d5793a9b2b2e86bddd21e0c".to_string(),
+        ];
+
+        let libs = Libraries::parse(&libraries[..]).unwrap().libs;
+
+        pretty_assertions::assert_eq!(
+            libs,
+            BTreeMap::from([
+                (
+                    PathBuf::from("./src/SizeAuctionDiscount.sol"),
+                    BTreeMap::from([
+                        (
+                            "Chainlink".to_string(),
+                            "0xffedba5e171c4f15abaaabc86e8bd01f9b54dae5".to_string()
+                        ),
+                        (
+                            "Math".to_string(),
+                            "0x902f6cf364b8d9470d5793a9b2b2e86bddd21e0c".to_string()
+                        )
+                    ])
+                ),
+                (
+                    PathBuf::from("./src/SizeAuction.sol"),
+                    BTreeMap::from([
+                        (
+                            "ChainlinkTWAP".to_string(),
+                            "0xffedba5e171c4f15abaaabc86e8bd01f9b54dae5".to_string()
+                        ),
+                        (
+                            "Math".to_string(),
+                            "0x902f6cf364b8d9470d5793a9b2b2e86bddd21e0c".to_string()
+                        )
+                    ])
+                ),
+                (
+                    PathBuf::from("./src/test/ChainlinkTWAP.t.sol"),
+                    BTreeMap::from([(
+                        "ChainlinkTWAP".to_string(),
+                        "0xffedba5e171c4f15abaaabc86e8bd01f9b54dae5".to_string()
+                    )])
+                ),
+            ])
+        );
     }
 }

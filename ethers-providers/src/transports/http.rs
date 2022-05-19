@@ -73,12 +73,20 @@ impl JsonRpcClient for Provider {
 
         let res = self.client.post(self.url.as_ref()).json(&payload).send().await?;
         let text = res.text().await?;
-        let response: Response<'_> = match serde_json::from_str(&text) {
-            Ok(response) => response,
+
+        let raw = match serde_json::from_str(&text) {
+            Ok(Response::Success { result, .. }) => result.to_owned(),
+            Ok(Response::Error { error, .. }) => return Err(error.into()),
+            Ok(_) => {
+                let err = ClientError::SerdeJson {
+                    err: serde::de::Error::custom("unexpected notification over HTTP transport"),
+                    text,
+                };
+                return Err(err)
+            }
             Err(err) => return Err(ClientError::SerdeJson { err, text }),
         };
 
-        let raw = response.as_result().map_err(Clone::clone)?;
         let res = serde_json::from_str(raw.get())
             .map_err(|err| ClientError::SerdeJson { err, text: raw.to_string() })?;
 
@@ -141,7 +149,7 @@ impl Provider {
     /// let provider = Http::new_with_client(url, client);
     /// ```
     pub fn new_with_client(url: impl Into<Url>, client: reqwest::Client) -> Self {
-        Self { id: AtomicU64::new(0), client, url: url.into() }
+        Self { id: AtomicU64::new(1), client, url: url.into() }
     }
 }
 
@@ -156,7 +164,7 @@ impl FromStr for Provider {
 
 impl Clone for Provider {
     fn clone(&self) -> Self {
-        Self { id: AtomicU64::new(0), client: self.client.clone(), url: self.url.clone() }
+        Self { id: AtomicU64::new(1), client: self.client.clone(), url: self.url.clone() }
     }
 }
 

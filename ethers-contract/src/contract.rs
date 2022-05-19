@@ -150,11 +150,21 @@ use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 /// [`Abigen` builder]: crate::Abigen
 /// [`event`]: method@crate::Contract::event
 /// [`method`]: method@crate::Contract::method
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Contract<M> {
     base_contract: BaseContract,
     client: Arc<M>,
     address: Address,
+}
+
+impl<M> Clone for Contract<M> {
+    fn clone(&self) -> Self {
+        Contract {
+            base_contract: self.base_contract.clone(),
+            client: self.client.clone(),
+            address: self.address,
+        }
+    }
 }
 
 impl<M: Middleware> Contract<M> {
@@ -262,13 +272,11 @@ impl<M: Middleware> Contract<M> {
     ///
     /// Clones `self` internally
     #[must_use]
-    pub fn connect(&self, client: Arc<M>) -> Self
+    pub fn connect<N>(&self, client: Arc<N>) -> Contract<N>
     where
-        M: Clone,
+        N: Clone,
     {
-        let mut this = self.clone();
-        this.client = client;
-        this
+        Contract { base_contract: self.base_contract.clone(), client, address: self.address }
     }
 
     /// Returns the contract's address

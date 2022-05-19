@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Arguments for verifying contracts
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyContract {
     #[serde(rename = "contractaddress")]
     pub address: Address,
@@ -26,13 +26,15 @@ pub struct VerifyContract {
     pub compiler_version: String,
     /// applicable when codeformat=solidity-single-file
     #[serde(rename = "optimizationUsed", skip_serializing_if = "Option::is_none")]
-    optimization_used: Option<String>,
+    pub optimization_used: Option<String>,
+    /// applicable when codeformat=solidity-single-file
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runs: Option<String>,
     /// NOTE: there is a typo in the etherscan API `constructorArguements`
     #[serde(rename = "constructorArguements", skip_serializing_if = "Option::is_none")]
     pub constructor_arguments: Option<String>,
-    #[serde(rename = "evmversion")]
+    /// applicable when codeformat=solidity-single-file
+    #[serde(rename = "evmversion", skip_serializing_if = "Option::is_none")]
     pub evm_version: Option<String>,
     #[serde(flatten)]
     pub other: HashMap<String, String>,
@@ -114,7 +116,7 @@ impl VerifyContract {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodeFormat {
     #[serde(rename = "solidity-single-file")]
     SingleFile,
@@ -303,14 +305,14 @@ impl Client {
         }
         if resp.result.starts_with("Contract source code not verified") {
             if let Some(ref cache) = self.cache {
-                let _ = cache.set_abi(address, None);
+                cache.set_abi(address, None);
             }
             return Err(EtherscanError::ContractCodeNotVerified(address))
         }
         let abi = serde_json::from_str(&resp.result)?;
 
         if let Some(ref cache) = self.cache {
-            let _ = cache.set_abi(address, Some(&abi));
+            cache.set_abi(address, Some(&abi));
         }
 
         Ok(abi)
@@ -348,14 +350,14 @@ impl Client {
         let response: Response<Vec<Metadata>> = self.get_json(&query).await?;
         if response.result.iter().any(|item| item.abi == "Contract source code not verified") {
             if let Some(ref cache) = self.cache {
-                let _ = cache.set_source(address, None);
+                cache.set_source(address, None);
             }
             return Err(EtherscanError::ContractCodeNotVerified(address))
         }
         let res = ContractMetadata { items: response.result };
 
         if let Some(ref cache) = self.cache {
-            let _ = cache.set_source(address, Some(&res));
+            cache.set_source(address, Some(&res));
         }
 
         Ok(res)
@@ -364,14 +366,34 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
-
-    use serial_test::serial;
-
+    use crate::{contract::VerifyContract, tests::run_at_least_duration, Client, EtherscanError};
     use ethers_core::types::Chain;
     use ethers_solc::{Project, ProjectPathsConfig};
+    use serial_test::serial;
+    use std::{path::PathBuf, time::Duration};
 
-    use crate::{contract::VerifyContract, tests::run_at_least_duration, Client, EtherscanError};
+    #[allow(unused)]
+    fn init_tracing() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .init();
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[ignore]
+    async fn can_fetch_ftm_contract_abi() {
+        init_tracing();
+        run_at_least_duration(Duration::from_millis(250), async {
+            let client = Client::new_from_env(Chain::Fantom).unwrap();
+
+            let _abi = client
+                .contract_abi("0x80AA7cb0006d5DDD91cce684229Ac6e398864606".parse().unwrap())
+                .await
+                .unwrap();
+        })
+        .await;
+    }
 
     #[tokio::test]
     #[serial]

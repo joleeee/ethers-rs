@@ -294,7 +294,7 @@ impl SolFilesCache {
         I: IntoIterator<Item = (&'a Path, V)>,
         V: IntoIterator<Item = &'a Version>,
     {
-        let mut files: HashMap<_, _> = files.into_iter().map(|(p, v)| (p, v)).collect();
+        let mut files: HashMap<_, _> = files.into_iter().collect();
 
         self.files.retain(|file, entry| {
             if entry.artifacts.is_empty() {
@@ -474,7 +474,9 @@ impl CacheEntry {
         }
     }
 
-    /// Retains only those artifacts that match the provided version.
+    /// Retains only those artifacts that match the provided versions.
+    ///
+    /// Removes an artifact entry if none of its versions is included in the `versions` set.
     pub fn retain_versions<'a, I>(&mut self, versions: I)
     where
         I: IntoIterator<Item = &'a Version>,
@@ -854,9 +856,10 @@ impl<'a, T: ArtifactOutput> ArtifactsCache<'a, T> {
     /// compiled and written to disk `written_artifacts`.
     ///
     /// Returns all the _cached_ artifacts.
-    pub fn write_cache(
+    pub fn consume(
         self,
         written_artifacts: &Artifacts<T::Artifact>,
+        write_to_disk: bool,
     ) -> Result<Artifacts<T::Artifact>> {
         match self {
             ArtifactsCache::Ephemeral(_, _) => Ok(Default::default()),
@@ -873,35 +876,54 @@ impl<'a, T: ArtifactOutput> ArtifactsCache<'a, T> {
                 // keep only those files that were previously filtered (not dirty, reused)
                 cache.retain(filtered.iter().map(|(p, (_, v))| (p.as_path(), v)));
 
-                // add the artifacts to the cache entries, this way we can keep a mapping from
-                // solidity file to its artifacts
+                // add the written artifacts to the cache entries, this way we can keep a mapping
+                // from solidity file to its artifacts
                 // this step is necessary because the concrete artifacts are only known after solc
                 // was invoked and received as output, before that we merely know the file and
                 // the versions, so we add the artifacts on a file by file basis
-                for (file, artifacts) in written_artifacts.as_ref() {
+                for (file, written_artifacts) in written_artifacts.as_ref() {
                     let file_path = Path::new(&file);
-                    if let Some((entry, versions)) = dirty_source_files.get_mut(file_path) {
-                        entry.insert_artifacts(artifacts.iter().map(|(name, artifacts)| {
-                            let artifacts = artifacts
-                                .iter()
-                                .filter(|artifact| versions.contains(&artifact.version))
-                                .collect::<Vec<_>>();
-                            (name, artifacts)
-                        }));
+                    if let Some((cache_entry, versions)) = dirty_source_files.get_mut(file_path) {
+                        cache_entry.insert_artifacts(written_artifacts.iter().map(
+                            |(name, artifacts)| {
+                                let artifacts = artifacts
+                                    .iter()
+                                    .filter(|artifact| versions.contains(&artifact.version))
+                                    .collect::<Vec<_>>();
+                                (name, artifacts)
+                            },
+                        ));
                     }
 
                     // cached artifacts that were overwritten also need to be removed from the
                     // `cached_artifacts` set
                     if let Some((f, mut cached)) = cached_artifacts.0.remove_entry(file) {
-                        cached.retain(|name, files| {
-                            if let Some(written_files) = artifacts.get(name) {
-                                files.retain(|f| {
-                                    written_files.iter().all(|other| other.version != f.version)
+                        tracing::trace!("checking {} for obsolete cached artifact entries", file);
+                        cached.retain(|name, cached_artifacts| {
+                            if let Some(written_files) = written_artifacts.get(name) {
+                                // written artifact clashes with a cached artifact, so we need to decide whether to keep or to remove the cached
+                                cached_artifacts.retain(|f| {
+                                    // we only keep those artifacts that don't conflict with written artifacts and which version was a compiler target
+                                    let retain = written_files
+                                        .iter()
+                                        .all(|other| other.version != f.version) && filtered.get(
+                                        &PathBuf::from(file)).map(|(_, versions)| {
+                                            versions.contains(&f.version)
+                                        }).unwrap_or_default();
+                                    if !retain {
+                                        tracing::trace!(
+                                            "purging obsolete cached artifact for contract {} and version {}",
+                                            name,
+                                            f.version
+                                        );
+                                    }
+                                    retain
                                 });
-                                return !files.is_empty()
+                                return !cached_artifacts.is_empty()
                             }
                             false
                         });
+
                         if !cached.is_empty() {
                             cached_artifacts.0.insert(f, cached);
                         }
@@ -913,8 +935,11 @@ impl<'a, T: ArtifactOutput> ArtifactsCache<'a, T> {
                     .extend(dirty_source_files.into_iter().map(|(file, (entry, _))| (file, entry)));
 
                 cache.strip_artifact_files_prefixes(project.artifacts_path());
+
                 // write to disk
-                cache.write(project.cache_path())?;
+                if write_to_disk {
+                    cache.write(project.cache_path())?;
+                }
 
                 Ok(cached_artifacts)
             }

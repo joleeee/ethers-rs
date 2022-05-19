@@ -140,7 +140,7 @@ impl<'a, T: ArtifactOutput> ProjectCompiler<'a, T> {
     /// let project = Project::builder().build().unwrap();
     /// let output = project.compile().unwrap();
     /// ```
-    #[cfg(all(feature = "svm-solc", feature = "async"))]
+    #[cfg(all(feature = "svm-solc"))]
     pub fn new(project: &'a Project<T>) -> Result<Self> {
         Self::with_sources(project, project.paths.read_input_files()?)
     }
@@ -151,7 +151,7 @@ impl<'a, T: ArtifactOutput> ProjectCompiler<'a, T> {
     ///
     /// Multiple (`Solc` -> `Sources`) pairs can be compiled in parallel if the `Project` allows
     /// multiple `jobs`, see [`crate::Project::set_solc_jobs()`].
-    #[cfg(all(feature = "svm-solc", feature = "async"))]
+    #[cfg(all(feature = "svm-solc"))]
     pub fn with_sources(project: &'a Project<T>, sources: Sources) -> Result<Self> {
         let graph = Graph::resolve_sources(&project.paths, sources)?;
         let (versions, edges) = graph.into_sources_by_version(project.offline)?;
@@ -304,7 +304,8 @@ impl<'a, T: ArtifactOutput> ArtifactsState<'a, T> {
     fn write_cache(self) -> Result<ProjectCompileOutput<T>> {
         let ArtifactsState { output, cache, compiled_artifacts } = self;
         let ignored_error_codes = cache.project().ignored_error_codes.clone();
-        let cached_artifacts = cache.write_cache(&compiled_artifacts)?;
+        let skip_write_to_disk = cache.project().no_artifacts || output.has_error();
+        let cached_artifacts = cache.consume(&compiled_artifacts, !skip_write_to_disk)?;
         Ok(ProjectCompileOutput {
             compiler_output: output,
             compiled_artifacts,
@@ -542,11 +543,20 @@ fn compile_parallel(
         }
     }
 
+    // need to get the currently installed reporter before installing the pool, otherwise each new
+    // thread in the pool will get initialized with the default value of the `thread_local!`'s
+    // localkey. This way we keep access to the reporter in the rayon pool
+    let scoped_report = report::get_default(|reporter| reporter.clone());
+
     // start a rayon threadpool that will execute all `Solc::compile()` processes
     let pool = rayon::ThreadPoolBuilder::new().num_threads(num_jobs).build().unwrap();
+
     let outputs = pool.install(move || {
         jobs.into_par_iter()
-            .map(|(solc, version, input, actually_dirty)| {
+            .map(move |(solc, version, input, actually_dirty)| {
+                // set the reporter on this thread
+                let _guard = report::set_scoped(&scoped_report);
+
                 tracing::trace!(
                     "calling solc `{}` {:?} with {} sources: {:?}",
                     version,
@@ -690,11 +700,11 @@ mod tests {
 
         let state = state.compile().unwrap();
         assert_eq!(state.output.sources.len(), 3);
-        for (f, source) in &state.output.sources {
+        for (f, source) in state.output.sources.sources() {
             if f.ends_with("A.sol") {
-                assert!(source.ast.is_object());
+                assert!(source.ast.is_some());
             } else {
-                assert!(source.ast.is_null());
+                assert!(source.ast.is_none());
             }
         }
 

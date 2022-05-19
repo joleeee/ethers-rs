@@ -1,21 +1,23 @@
 //! project tests
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io,
     path::{Path, PathBuf},
     str::FromStr,
 };
 
+use ethers_core::types::Address;
 use ethers_solc::{
-    artifacts::BytecodeHash,
+    artifacts::{BytecodeHash, Libraries, ModelCheckerEngine::CHC, ModelCheckerSettings},
     cache::{SolFilesCache, SOLIDITY_FILES_CACHE_FILENAME},
     project_util::*,
     remappings::Remapping,
-    ConfigurableArtifacts, ExtraOutputValues, Graph, Project, ProjectCompileOutput,
+    CompilerInput, ConfigurableArtifacts, ExtraOutputValues, Graph, Project, ProjectCompileOutput,
     ProjectPathsConfig, Solc, TestFileFilter,
 };
 use pretty_assertions::assert_eq;
+use semver::Version;
 
 #[allow(unused)]
 fn init_tracing() {
@@ -155,7 +157,7 @@ fn can_compile_dapp_detect_changes_in_libs() {
     project
         .paths_mut()
         .remappings
-        .push(Remapping::from_str(&format!("remapping={}/", remapping.display())).unwrap());
+        .push(Remapping::from_str(&format!("remapping/={}/", remapping.display())).unwrap());
 
     let src = project
         .add_source(
@@ -490,8 +492,7 @@ contract C { }
 
     assert_eq!(
         result,
-        r#"
-pragma solidity ^0.8.10;
+        r#"pragma solidity ^0.8.10;
 
 contract C { }
 
@@ -547,8 +548,7 @@ contract C { }
 
     assert_eq!(
         result,
-        r#"
-pragma solidity ^0.8.10;
+        r#"pragma solidity ^0.8.10;
 pragma experimental ABIEncoderV2;
 
 contract C { }
@@ -656,7 +656,7 @@ contract C { }
 
     let result = project.flatten(&f).unwrap();
     assert_eq!(
-        result.trim(),
+        result,
         r#"pragma solidity ^0.8.10;
 
 contract C { }
@@ -664,7 +664,8 @@ contract C { }
 error IllegalArgument();
 error IllegalState();
 
-contract A { }"#
+contract A { }
+"#
     );
 }
 
@@ -707,7 +708,7 @@ contract C { }
 
     let result = project.flatten(&f).unwrap();
     assert_eq!(
-        result.trim(),
+        result,
         r#"pragma solidity ^0.8.10;
 
 contract C { }
@@ -716,7 +717,156 @@ contract C { }
 
 contract B { }
 
-contract A { }"#
+contract A { }
+"#
+    );
+}
+
+#[test]
+fn can_flatten_with_alias() {
+    let project = TempProject::dapptools().unwrap();
+
+    let f = project
+        .add_source(
+            "Contract",
+            r#"pragma solidity ^0.8.10;
+import { ParentContract as Parent } from "./Parent.sol";
+import { AnotherParentContract as AnotherParent } from "./AnotherParent.sol";
+import { PeerContract as Peer } from "./Peer.sol";
+import { MathLibrary as Math } from "./Math.sol";
+import * as Lib from "./SomeLib.sol";
+
+contract Contract is Parent,
+    AnotherParent {
+    using Math for uint256;
+
+    string public usingString = "using Math for uint256;";
+    string public inheritanceString = "\"Contract is Parent {\"";
+    string public castString = 'Peer(smth) ';
+    string public methodString = '\' Math.max()';
+
+    Peer public peer;
+
+    error Peer();
+
+    constructor(address _peer) {
+        peer = Peer(_peer);
+    }
+
+    function Math(uint256 value) external pure returns (uint256) {
+        return Math.minusOne(Math.max() - value.diffMax());
+    }
+}
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "Parent",
+            r#"pragma solidity ^0.8.10;
+contract ParentContract { }
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "AnotherParent",
+            r#"pragma solidity ^0.8.10;
+contract AnotherParentContract { }
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "Peer",
+            r#"pragma solidity ^0.8.10;
+contract PeerContract { }
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "Math",
+            r#"pragma solidity ^0.8.10;
+library MathLibrary {
+    function minusOne(uint256 val) internal returns (uint256) {
+        return val - 1;
+    }
+
+    function max() internal returns (uint256) {
+        return type(uint256).max;
+    }
+
+    function diffMax(uint256 value) internal returns (uint256) {
+        return type(uint256).max - value;
+    }
+}
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "SomeLib",
+            r#"pragma solidity ^0.8.10;
+library SomeLib { }
+"#,
+        )
+        .unwrap();
+
+    let result = project.flatten(&f).unwrap();
+    assert_eq!(
+        result,
+        r#"pragma solidity ^0.8.10;
+
+contract ParentContract { }
+
+contract AnotherParentContract { }
+
+contract PeerContract { }
+
+library MathLibrary {
+    function minusOne(uint256 val) internal returns (uint256) {
+        return val - 1;
+    }
+
+    function max() internal returns (uint256) {
+        return type(uint256).max;
+    }
+
+    function diffMax(uint256 value) internal returns (uint256) {
+        return type(uint256).max - value;
+    }
+}
+
+library SomeLib { }
+
+contract Contract is ParentContract,
+    AnotherParentContract {
+    using MathLibrary for uint256;
+
+    string public usingString = "using Math for uint256;";
+    string public inheritanceString = "\"Contract is Parent {\"";
+    string public castString = 'Peer(smth) ';
+    string public methodString = '\' Math.max()';
+
+    PeerContract public peer;
+
+    error Peer();
+
+    constructor(address _peer) {
+        peer = PeerContract(_peer);
+    }
+
+    function Math(uint256 value) external pure returns (uint256) {
+        return MathLibrary.minusOne(MathLibrary.max() - value.diffMax());
+    }
+}
+"#
     );
 }
 
@@ -814,6 +964,130 @@ contract LinkTest {
     assert_eq!(bytecode.clone(), serde_json::from_str(&s).unwrap());
 }
 
+#[test]
+fn can_apply_libraries() {
+    let mut tmp = TempProject::dapptools().unwrap();
+
+    tmp.add_source(
+        "LinkTest",
+        r#"
+// SPDX-License-Identifier: MIT
+import "./MyLib.sol";
+contract LinkTest {
+    function foo() public returns (uint256) {
+        return MyLib.foobar(1);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let lib = tmp
+        .add_source(
+            "MyLib",
+            r#"
+// SPDX-License-Identifier: MIT
+library MyLib {
+    function foobar(uint256 a) public view returns (uint256) {
+    	return a * 100;
+    }
+}
+"#,
+        )
+        .unwrap();
+
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    assert!(compiled.find("MyLib").is_some());
+    let contract = compiled.find("LinkTest").unwrap();
+    let bytecode = &contract.bytecode.as_ref().unwrap().object;
+    assert!(bytecode.is_unlinked());
+
+    // provide the library settings to let solc link
+    tmp.project_mut().solc_config.settings.libraries = BTreeMap::from([(
+        lib,
+        BTreeMap::from([("MyLib".to_string(), format!("{:?}", Address::zero()))]),
+    )])
+    .into();
+
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    assert!(compiled.find("MyLib").is_some());
+    let contract = compiled.find("LinkTest").unwrap();
+    let bytecode = &contract.bytecode.as_ref().unwrap().object;
+    assert!(!bytecode.is_unlinked());
+
+    let libs = Libraries::parse(&[format!("./src/MyLib.sol:MyLib:{:?}", Address::zero())]).unwrap();
+    // provide the library settings to let solc link
+    tmp.project_mut().solc_config.settings.libraries = libs.with_applied_remappings(tmp.paths());
+
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    assert!(compiled.find("MyLib").is_some());
+    let contract = compiled.find("LinkTest").unwrap();
+    let bytecode = &contract.bytecode.as_ref().unwrap().object;
+    assert!(!bytecode.is_unlinked());
+}
+
+#[test]
+fn can_apply_libraries_with_remappings() {
+    let mut tmp = TempProject::dapptools().unwrap();
+
+    let remapping = tmp.paths().libraries[0].join("remapping");
+    tmp.paths_mut()
+        .remappings
+        .push(Remapping::from_str(&format!("remapping/={}/", remapping.display())).unwrap());
+
+    tmp.add_source(
+        "LinkTest",
+        r#"
+// SPDX-License-Identifier: MIT
+import "remapping/MyLib.sol";
+contract LinkTest {
+    function foo() public returns (uint256) {
+        return MyLib.foobar(1);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    tmp.add_lib(
+        "remapping/MyLib",
+        r#"
+// SPDX-License-Identifier: MIT
+library MyLib {
+    function foobar(uint256 a) public view returns (uint256) {
+    	return a * 100;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    assert!(compiled.find("MyLib").is_some());
+    let contract = compiled.find("LinkTest").unwrap();
+    let bytecode = &contract.bytecode.as_ref().unwrap().object;
+    assert!(bytecode.is_unlinked());
+
+    let libs =
+        Libraries::parse(&[format!("remapping/MyLib.sol:MyLib:{:?}", Address::zero())]).unwrap(); // provide the library settings to let solc link
+    tmp.project_mut().solc_config.settings.libraries = libs.with_applied_remappings(tmp.paths());
+
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    assert!(compiled.find("MyLib").is_some());
+    let contract = compiled.find("LinkTest").unwrap();
+    let bytecode = &contract.bytecode.as_ref().unwrap().object;
+    assert!(!bytecode.is_unlinked());
+}
 #[test]
 fn can_recompile_with_changes() {
     let mut tmp = TempProject::dapptools().unwrap();
@@ -1023,11 +1297,11 @@ fn can_sanitize_bytecode_hash() {
 fn can_compile_std_json_input() {
     let tmp = TempProject::dapptools_init().unwrap();
     tmp.assert_no_errors();
-    let source =
-        tmp.list_source_files().into_iter().filter(|p| p.ends_with("Dapp.t.sol")).next().unwrap();
+    let source = tmp.list_source_files().into_iter().find(|p| p.ends_with("Dapp.t.sol")).unwrap();
     let input = tmp.project().standard_json_input(source).unwrap();
 
     assert!(input.settings.remappings.contains(&"ds-test/=lib/ds-test/src/".parse().unwrap()));
+    let input: CompilerInput = input.into();
     assert!(input.sources.contains_key(Path::new("lib/ds-test/src/test.sol")));
 
     // should be installed
@@ -1036,4 +1310,104 @@ fn can_compile_std_json_input() {
         assert!(!out.has_error());
         assert!(out.sources.contains_key("lib/ds-test/src/test.sol"));
     }
+}
+
+#[test]
+fn can_compile_model_checker_sample() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/model-checker-sample");
+    let paths = ProjectPathsConfig::builder().sources(root);
+
+    let mut project = TempProject::<ConfigurableArtifacts>::new(paths).unwrap();
+    project.project_mut().solc_config.settings.model_checker = Some(ModelCheckerSettings {
+        contracts: BTreeMap::new(),
+        engine: Some(CHC),
+        targets: None,
+        timeout: Some(10000),
+    });
+    let compiled = project.compile().unwrap();
+
+    assert!(compiled.find("Assert").is_some());
+    assert!(!compiled.has_compiler_errors());
+    assert!(compiled.has_compiler_warnings());
+}
+
+fn remove_solc_if_exists(version: &Version) {
+    match Solc::find_svm_installed_version(version.to_string()).unwrap() {
+        Some(_) => svm::remove_version(version).expect("failed to remove version"),
+        None => {}
+    };
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn can_install_solc_and_compile_version() {
+    let project = TempProject::dapptools().unwrap();
+    let version = Version::new(0, 8, 10);
+
+    project
+        .add_source(
+            "Contract",
+            format!(
+                r#"
+pragma solidity {};
+contract Contract {{ }}
+"#,
+                version
+            ),
+        )
+        .unwrap();
+
+    remove_solc_if_exists(&version);
+
+    let compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn can_install_solc_and_compile_std_json_input_async() {
+    let tmp = TempProject::dapptools_init().unwrap();
+    tmp.assert_no_errors();
+    let source = tmp.list_source_files().into_iter().find(|p| p.ends_with("Dapp.t.sol")).unwrap();
+    let input = tmp.project().standard_json_input(source).unwrap();
+    let solc = &tmp.project().solc;
+
+    assert!(input.settings.remappings.contains(&"ds-test/=lib/ds-test/src/".parse().unwrap()));
+    let input: CompilerInput = input.into();
+    assert!(input.sources.contains_key(Path::new("lib/ds-test/src/test.sol")));
+
+    remove_solc_if_exists(&solc.version().expect("failed to get version"));
+
+    let out = solc.async_compile(&input).await.unwrap();
+    assert!(!out.has_error());
+    assert!(out.sources.contains_key("lib/ds-test/src/test.sol"));
+}
+
+#[test]
+fn can_purge_obsolete_artifacts() {
+    let mut project = TempProject::<ConfigurableArtifacts>::dapptools().unwrap();
+    project.set_solc("0.8.10");
+    project
+        .add_source(
+            "Contract",
+            r#"
+    pragma solidity >=0.8.10;
+
+   contract Contract {
+        function xyz() public {
+        }
+   }
+   "#,
+        )
+        .unwrap();
+
+    let compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+    assert!(!compiled.is_unchanged());
+    assert_eq!(compiled.into_artifacts().count(), 1);
+
+    project.set_solc("0.8.13");
+
+    let compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+    assert!(!compiled.is_unchanged());
+    assert_eq!(compiled.into_artifacts().count(), 1);
 }

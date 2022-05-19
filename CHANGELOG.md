@@ -4,6 +4,13 @@
 
 ### Unreleased
 
+- Added Cronos testnet to etherscan options [1276](https://github.com/gakonst/ethers-rs/pull/1276)
+- Fix parsing of a pending block
+  [1272](https://github.com/gakonst/ethers-rs/pull/1272)
+- Removed Cronos mainnet beta from `is_legacy` [1246](https://github.com/gakonst/ethers-rs/pull/1246)
+- Fix RLP decoding of `from` field for `Eip1559TransactionRequest` and
+  `Eip2930TransactionRequest`, remove `Eip1559TransactionRequest` `sighash`
+  method [1180](https://github.com/gakonst/ethers-rs/pull/1180)
 - Fix RLP encoding of absent access list in `Transaction` [1137](https://github.com/gakonst/ethers-rs/pull/1137)
 - Pass compilation time as additional argument to `Reporter::on_solc_success` [1098](https://github.com/gakonst/ethers-rs/pull/1098)
 - Fix aws signer bug which maps un-normalized signature to error if no normalization occurs (in `aws::utils::decode_signature`)
@@ -57,11 +64,18 @@
 - Add Yul compilation [994](https://github.com/gakonst/ethers-rs/pull/994)
 - Enforce commutativity of ENS reverse resolution
   [#996](https://github.com/gakonst/ethers-rs/pull/996)
+- Add `TransactionReceipt::to` and `TransactionReceipt::from`
+  [#1184](https://github.com/gakonst/ethers-rs/pull/1184)
+- Add `From<H160>` and From<Vec<H160>> traits to `ValueOrArray<H160>` [#1199](https://github.com/gakonst/ethers-rs/pull/1200)
 
 ## ethers-contract-abigen
 
 ### Unreleased
 
+- Support overloaded events
+  [#1233](https://github.com/gakonst/ethers-rs/pull/1233)
+- Relax Clone requirements when Arc<Middleware> is used
+  [#1183](https://github.com/gakonst/ethers-rs/pull/1183)
 - Generate a deploy function if bytecode is provided in the abigen! input (json artifact)
   [#1030](https://github.com/gakonst/ethers-rs/pull/1030).
 - Generate correct bindings of struct's field names that are reserved words
@@ -109,6 +123,9 @@
 - Add support for library linking and make `Bytecode`'s `object` filed an
   `enum BytecodeObject` [#656](https://github.com/gakonst/ethers-rs/pull/656).
 - Nit: remove accidentally doubled double-quotes in an error message
+- Fix when compiler-out metadata is empty and there's no internalType [#1182](https://github.com/gakonst/ethers-rs/pull/1182)
+- Add basic `solc` model checker options.
+  [#1258](https://github.com/gakonst/ethers-rs/pull/1258)
 
 ### 0.6.0
 
@@ -144,6 +161,10 @@
 
 ### Unreleased
 
+- Load previous logs before subscribing to new logs in case fromBlock is set
+  [1264](https://github.com/gakonst/ethers-rs/pull/1264)
+- Add retries to the pending transaction future
+  [1221](https://github.com/gakonst/ethers-rs/pull/1221)
 - Add support for basic and bearer authentication in http and non-wasm websockets.
   [829](https://github.com/gakonst/ethers-rs/pull/829)
 - Export `ethers_providers::IpcError` and `ethers_providers::QuorumError`
@@ -192,6 +213,8 @@
 
 ### Unreleased
 
+- Relax Clone requirements when Arc<Middleware> is used
+  [#1183](https://github.com/gakonst/ethers-rs/pull/1183)
 - Add `EventStream::select` to combine streams with different event types
   [#725](https://github.com/gakonst/ethers-rs/pull/725)
 - Substitute output tuples with rust struct types for function calls
@@ -235,8 +258,11 @@
 
 ### Unreleased
 
+- Relax Clone requirements when Arc<Middleware> is used
+  [#1183](https://github.com/gakonst/ethers-rs/pull/1183)
 - Ensure a consistent chain ID between a Signer and Provider in SignerMiddleware
   [#1095](https://gakonst/ethers-rs/pull/1095)
+- Add BlockNative gas oracle [#1175](https://github.com/gakonst/ethers-rs/pull/1175)
 
 ### 0.6.0
 
