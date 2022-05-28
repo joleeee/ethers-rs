@@ -744,6 +744,36 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         Ok(H256::from_slice(&Vec::from_hex(value)?))
     }
 
+    /// Get the storage of an array beginning at a particular slot location
+    async fn get_storage_array<T: Into<NameOrAddress> + Send + Sync>(
+        &self,
+        from: T,
+        location: H256,
+        length: i32,
+        block: Option<BlockId>,
+    ) -> Result<Vec<H256>, ProviderError> {
+        let from = match from.into() {
+            NameOrAddress::Name(ens_name) => self.resolve_name(&ens_name).await?,
+            NameOrAddress::Address(addr) => addr,
+        };
+
+        let from = utils::serialize(&from);
+        let location = utils::serialize(&location);
+        let length = utils::serialize(&length);
+        let block = utils::serialize(&block.unwrap_or_else(|| BlockNumber::Latest.into()));
+
+        // get the hex encoded value.
+        let value: Vec<String> = self.request("eth_getStorageArray", [from, location, length, block]).await?;
+        // get rid of the 0x prefix and left pad it with zeroes.
+        let value = value.iter().map(|v| format!("{:0>64}", v.replace("0x", ""))).collect::<Vec<String>>();
+        let mut values = Vec::new();
+        for val in value {
+            let val = H256::from_slice(&Vec::from_hex(val)?);
+            values.push(val);
+        }
+        Ok(values)
+    }
+
     /// Returns the deployed code at a given address
     async fn get_code<T: Into<NameOrAddress> + Send + Sync>(
         &self,
