@@ -763,9 +763,11 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         let block = utils::serialize(&block.unwrap_or_else(|| BlockNumber::Latest.into()));
 
         // get the hex encoded value.
-        let value: Vec<String> = self.request("eth_getStorageArray", [from, location, length, block]).await?;
+        let value: Vec<String> =
+            self.request("eth_getStorageArray", [from, location, length, block]).await?;
         // get rid of the 0x prefix and left pad it with zeroes.
-        let value = value.iter().map(|v| format!("{:0>64}", v.replace("0x", ""))).collect::<Vec<String>>();
+        let value =
+            value.iter().map(|v| format!("{:0>64}", v.replace("0x", ""))).collect::<Vec<String>>();
         let mut values = Vec::new();
         for val in value {
             let val = H256::from_slice(&Vec::from_hex(val)?);

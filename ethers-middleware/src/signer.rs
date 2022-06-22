@@ -328,7 +328,10 @@ where
         state_override: Option<StateOverride>,
     ) -> Result<Bytes, Self::Error> {
         let tx = self.set_tx_from_if_none(tx);
-        self.inner().call(&tx, block, state_override).await.map_err(SignerMiddlewareError::MiddlewareError)
+        self.inner()
+            .call(&tx, block, state_override)
+            .await
+            .map_err(SignerMiddlewareError::MiddlewareError)
     }
 }
 
