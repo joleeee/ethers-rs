@@ -4,7 +4,7 @@ use super::base::{decode_function_data, AbiError};
 use ethers_core::{
     abi::{AbiDecode, AbiEncode, Detokenize, Function, InvalidOutputType, Tokenizable},
     types::{
-        transaction::eip2718::TypedTransaction, Address, BlockId, Bytes, Selector, StateOverride,
+        transaction::eip2718::TypedTransaction, Address, BlockId, Bytes, Selector,
         TransactionRequest, U256,
     },
     utils::id,
@@ -73,8 +73,6 @@ pub struct ContractCall<M, D> {
     pub function: Function,
     /// Optional block number to be used when calculating the transaction's gas and nonce
     pub block: Option<BlockId>,
-    /// Optional state override
-    pub state_override: Option<StateOverride>,
     pub(crate) client: Arc<M>,
     pub(crate) datatype: PhantomData<D>,
 }
@@ -95,11 +93,6 @@ impl<M, D: Detokenize> ContractCall<M, D> {
     /// Sets the `from` field in the transaction to the provided value
     pub fn from<T: Into<Address>>(mut self, from: T) -> Self {
         self.tx.set_from(from.into());
-        self
-    }
-
-    pub fn state_override<T: Into<StateOverride>>(mut self, state_override: T) -> Self {
-        self.state_override = Some(state_override.into());
         self
     }
 
@@ -167,11 +160,8 @@ where
     ///
     /// Note: this function _does not_ send a transaction from your account
     pub async fn call(&self) -> Result<D, ContractError<M>> {
-        let bytes = self
-            .client
-            .call(&self.tx, self.block, self.state_override.clone())
-            .await
-            .map_err(ContractError::MiddlewareError)?;
+        let bytes =
+            self.client.call(&self.tx, self.block).await.map_err(ContractError::MiddlewareError)?;
 
         // decode output
         let data = decode_function_data(&self.function, &bytes, false)?;

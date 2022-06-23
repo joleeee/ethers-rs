@@ -16,9 +16,9 @@ use ethers_core::{
     types::{
         transaction::{eip2718::TypedTransaction, eip2930::AccessListWithGasUsed},
         Address, Block, BlockId, BlockNumber, BlockTrace, Bytes, EIP1186ProofResponse, FeeHistory,
-        Filter, FilterBlockOption, Log, NameOrAddress, Selector, Signature, StateOverride, Trace,
-        TraceFilter, TraceType, Transaction, TransactionReceipt, TransactionRequest, TxHash,
-        TxpoolContent, TxpoolInspect, TxpoolStatus, H256, U256, U64,
+        Filter, FilterBlockOption, Log, NameOrAddress, Selector, Signature, Trace, TraceFilter,
+        TraceType, Transaction, TransactionReceipt, TransactionRequest, TxHash, TxpoolContent,
+        TxpoolInspect, TxpoolStatus, H256, U256, U64,
     },
     utils,
 };
@@ -554,12 +554,10 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         &self,
         tx: &TypedTransaction,
         block: Option<BlockId>,
-        state_override: Option<StateOverride>,
     ) -> Result<Bytes, ProviderError> {
         let tx = utils::serialize(tx);
         let block = utils::serialize(&block.unwrap_or_else(|| BlockNumber::Latest.into()));
-        let state_override = utils::serialize(&state_override.unwrap_or_default());
-        self.request("eth_call", [tx, block, state_override]).await
+        self.request("eth_call", [tx, block]).await
     }
 
     /// Sends a transaction to a single Ethereum node and return the estimated amount of gas
@@ -917,7 +915,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
                             to: Some(NameOrAddress::Address(token.contract)),
                             ..Default::default()
                         };
-                        let data = self.call(&tx.into(), None, None).await?;
+                        let data = self.call(&tx.into(), None).await?;
                         if decode_bytes::<Address>(ParamType::Address, data) != owner {
                             return Err(ProviderError::CustomError("Incorrect owner.".to_string()))
                         }
@@ -937,7 +935,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
                             to: Some(NameOrAddress::Address(token.contract)),
                             ..Default::default()
                         };
-                        let data = self.call(&tx.into(), None, None).await?;
+                        let data = self.call(&tx.into(), None).await?;
                         if decode_bytes::<u64>(ParamType::Uint(64), data) == 0 {
                             return Err(ProviderError::CustomError("Incorrect balance.".to_string()))
                         }
@@ -983,7 +981,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
             to: Some(NameOrAddress::Address(token.contract)),
             ..Default::default()
         };
-        let data = self.call(&tx.into(), None, None).await?;
+        let data = self.call(&tx.into(), None).await?;
         let mut metadata_url = Url::parse(&decode_bytes::<String>(ParamType::String, data))
             .map_err(|e| ProviderError::CustomError(format!("Invalid metadata url: {}", e)))?;
 
@@ -1251,7 +1249,7 @@ impl<P: JsonRpcClient> Provider<P> {
 
         // first get the resolver responsible for this name
         // the call will return a Bytes array which we convert to an address
-        let data = self.call(&ens::get_resolver(ens_addr, ens_name).into(), None, None).await?;
+        let data = self.call(&ens::get_resolver(ens_addr, ens_name).into(), None).await?;
 
         // otherwise, decode_bytes panics
         if data.0.is_empty() {
@@ -1265,11 +1263,7 @@ impl<P: JsonRpcClient> Provider<P> {
 
         // resolve
         let data = self
-            .call(
-                &ens::resolve(resolver_address, selector, ens_name, parameters).into(),
-                None,
-                None,
-            )
+            .call(&ens::resolve(resolver_address, selector, ens_name, parameters).into(), None)
             .await?;
 
         Ok(decode_bytes(param, data))

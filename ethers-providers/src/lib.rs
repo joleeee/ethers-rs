@@ -324,9 +324,8 @@ pub trait Middleware: Sync + Send + Debug {
         &self,
         tx: &TypedTransaction,
         block: Option<BlockId>,
-        state_override: Option<StateOverride>,
     ) -> Result<Bytes, Self::Error> {
-        self.inner().call(tx, block, state_override).await.map_err(FromErr::from)
+        self.inner().call(tx, block).await.map_err(FromErr::from)
     }
 
     async fn syncing(&self) -> Result<SyncingStatus, Self::Error> {

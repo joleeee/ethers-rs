@@ -1,6 +1,6 @@
 use ethers_core::types::{
     transaction::{eip2718::TypedTransaction, eip2930::AccessListWithGasUsed},
-    Address, BlockId, Bytes, Signature, StateOverride, U256,
+    Address, BlockId, Bytes, Signature, U256,
 };
 use ethers_providers::{maybe, FromErr, Middleware, PendingTransaction};
 use ethers_signers::Signer;
@@ -325,11 +325,10 @@ where
         &self,
         tx: &TypedTransaction,
         block: Option<BlockId>,
-        state_override: Option<StateOverride>,
     ) -> Result<Bytes, Self::Error> {
         let tx = self.set_tx_from_if_none(tx);
         self.inner()
-            .call(&tx, block, state_override)
+            .call(&tx, block)
             .await
             .map_err(SignerMiddlewareError::MiddlewareError)
     }

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ethers_core::types::{
     transaction::eip2718::TypedTransaction, Block, BlockId, BlockNumber, Bytes, FilterBlockOption,
-    NameOrAddress, StateOverride, Transaction, TransactionReceipt, TxHash, U256,
+    NameOrAddress, Transaction, TransactionReceipt, TxHash, U256,
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -201,11 +201,10 @@ where
         &self,
         tx: &TypedTransaction,
         block: Option<BlockId>,
-        state_override: Option<StateOverride>,
     ) -> Result<Bytes, Self::Error> {
         let block = self.normalize_block_id(block).await?;
 
-        self.inner().call(tx, block, state_override).await.map_err(ethers_providers::FromErr::from)
+        self.inner().call(tx, block).await.map_err(ethers_providers::FromErr::from)
     }
 
     async fn get_balance<T: Into<NameOrAddress> + Send + Sync>(
