@@ -474,16 +474,6 @@ pub trait Middleware: Sync + Send + Debug {
         self.inner().get_storage_at(from, location, block).await.map_err(FromErr::from)
     }
 
-    async fn get_storage_array<T: Into<NameOrAddress> + Send + Sync>(
-        &self,
-        from: T,
-        location: H256,
-        length: i32,
-        block: Option<BlockId>,
-    ) -> Result<Vec<H256>, Self::Error> {
-        self.inner().get_storage_array(from, location, length, block).await.map_err(FromErr::from)
-    }
-
     async fn get_proof<T: Into<NameOrAddress> + Send + Sync>(
         &self,
         from: T,
