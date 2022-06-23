@@ -774,38 +774,6 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         Ok(values)
     }
 
-    async fn get_storage_distributed(
-        &self,
-        from: Vec<Address>,
-        locations: Vec<H256>,
-        block: Option<BlockId>,
-    ) -> Result<Vec<Vec<H256>>, ProviderError> {
-        //let from: Vec<_> = from.iter().map(utils::serialize).collect();
-        //let locations: Vec<_> = locations.iter().map(utils::serialize).collect();
-        let from = utils::serialize(&from);
-        let locations = utils::serialize(&locations);
-        let block = utils::serialize(&block.unwrap_or_else(|| BlockNumber::Latest.into()));
-
-        // get the encoded result
-        let value: Vec<Vec<String>> =
-            self.request("eth_getStorageDistributed", [from, locations, block]).await?;
-
-        let value: Vec<Vec<_>> = value
-            .iter()
-            .map(|account| {
-                account
-                    .iter()
-                    .map(|slot| {
-                        H256::from_slice(
-                            &Vec::from_hex(format!("{:0>64}", slot.replace("0x", ""))).unwrap(),
-                        )
-                    })
-                    .collect()
-            })
-            .collect();
-        Ok(value)
-    }
-
     /// Returns the deployed code at a given address
     async fn get_code<T: Into<NameOrAddress> + Send + Sync>(
         &self,
