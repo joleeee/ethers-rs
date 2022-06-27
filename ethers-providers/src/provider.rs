@@ -1100,15 +1100,6 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         self.subscribe(["newPendingTransactions"]).await
     }
 
-    async fn subscribe_pending_txs_complete(
-        &self,
-    ) -> Result<SubscriptionStream<'_, P, Transaction>, ProviderError>
-    where
-        P: PubsubClient,
-    {
-        self.subscribe(["newPendingTransactionsComplete"]).await
-    }
-
     async fn subscribe_logs<'a>(
         &'a self,
         filter: &Filter,

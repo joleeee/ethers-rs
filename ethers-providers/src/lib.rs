@@ -616,15 +616,6 @@ pub trait Middleware: Sync + Send + Debug {
         self.inner().subscribe_pending_txs().await.map_err(FromErr::from)
     }
 
-    async fn subscribe_pending_txs_complete(
-        &self,
-    ) -> Result<SubscriptionStream<'_, Self::Provider, Transaction>, Self::Error>
-    where
-        <Self as Middleware>::Provider: PubsubClient,
-    {
-        self.inner().subscribe_pending_txs_complete().await.map_err(FromErr::from)
-    }
-
     async fn subscribe_logs<'a>(
         &'a self,
         filter: &Filter,
