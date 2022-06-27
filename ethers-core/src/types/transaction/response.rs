@@ -11,7 +11,7 @@ use rlp::{Decodable, DecoderError, RlpStream};
 use serde::{Deserialize, Serialize};
 
 /// Details of a signed transaction
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Transaction {
     /// The transaction's hash
     pub hash: H256,
@@ -42,7 +42,7 @@ pub struct Transaction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<Address>,
 
-    /// Transfered value
+    /// Transferred value
     pub value: U256,
 
     /// Gas Price, null for Type 2 transactions
@@ -370,7 +370,7 @@ impl Decodable for Transaction {
 }
 
 /// "Receipt" of an executed transaction: details of its execution.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionReceipt {
     /// Transaction hash.
     #[serde(rename = "transactionHash")]
@@ -404,6 +404,7 @@ pub struct TransactionReceipt {
     /// Status: either 1 (success) or 0 (failure). Only present after activation of [EIP-658](https://eips.ethereum.org/EIPS/eip-658)
     pub status: Option<U64>,
     /// State root. Only present before activation of [EIP-658](https://eips.ethereum.org/EIPS/eip-658)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<H256>,
     /// Logs bloom
     #[serde(rename = "logsBloom")]
@@ -504,6 +505,16 @@ mod tests {
         assert_eq!(tx.access_list.unwrap(), lst);
         assert_eq!(tx.max_fee_per_gas.unwrap().as_u64(), 0x3b9aca0e);
         assert_eq!(tx.max_priority_fee_per_gas.unwrap().as_u64(), 0x3b9aca00);
+    }
+
+    #[test]
+    fn tx_roundtrip() {
+        let json = serde_json::json!({"accessList":[{"address":"0x8ba1f109551bd432803012645ac136ddd64dba72","storageKeys":["0x0000000000000000000000000000000000000000000000000000000000000000","0x0000000000000000000000000000000000000000000000000000000000000042"]}],"blockHash":"0x55ae43d3511e327dc532855510d110676d340aa1bbba369b4b98896d86559586","blockNumber":"0xa3d322","chainId":"0x3","from":"0x541d6a0e9ca9e7a083e41e2e178eef9f22d7492e","gas":"0x6a40","gasPrice":"0x3b9aca07","hash":"0x824384376c5972498c6fcafe71fd8cad1689f64e7d5e270d025a898638c0c34d","input":"0x","maxFeePerGas":"0x3b9aca0e","maxPriorityFeePerGas":"0x3b9aca00","nonce":"0x0","r":"0xf13b5088108f783f4b6048d4be456971118aabfb88be96bb541d734b6c2b20dc","s":"0x13fb7eb25a7d5df42a176cd4c6a086e19163ed7cd8ffba015f939d24f66bc17a","to":"0x8210357f377e901f18e45294e86a2a32215cc3c9","transactionIndex":"0xd","type":"0x2","v":"0x1","value":"0x7b"});
+        let tx: Transaction = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(tx.nonce, 0u64.into());
+
+        let encoded = serde_json::to_value(tx).unwrap();
+        assert_eq!(encoded, json);
     }
 
     #[test]
@@ -807,5 +818,61 @@ mod tests {
     }"#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn serde_create_transaction_receipt() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{
+    "transactionHash": "0x611b173b0e0dfda94da7bfb6cb77c9f1c03e2f2149ba060e6bddfaa219942369",
+    "blockHash": "0xa11871d61e0e703ae33b358a6a9653c43e4216f277d4a1c7377b76b4d5b4cbf1",
+    "blockNumber": "0xe3c1d8",
+    "contractAddress": "0x08f6db30039218894067023a3593baf27d3f4a2b",
+    "cumulativeGasUsed": "0x1246047",
+    "effectiveGasPrice": "0xa02ffee00",
+    "from": "0x0968995a48162a23af60d3ca25cddfa143cd8891",
+    "gasUsed": "0x1b9229",
+    "logs": [
+      {
+        "address": "0x08f6db30039218894067023a3593baf27d3f4a2b",
+        "topics": [
+          "0x40c340f65e17194d14ddddb073d3c9f888e3cb52b5aae0c6c7706b4fbc905fac"
+        ],
+        "data": "0x0000000000000000000000000968995a48162a23af60d3ca25cddfa143cd88910000000000000000000000000000000000000000000000000000000000002616",
+        "blockNumber": "0xe3c1d8",
+        "transactionHash": "0x611b173b0e0dfda94da7bfb6cb77c9f1c03e2f2149ba060e6bddfaa219942369",
+        "transactionIndex": "0xdf",
+        "blockHash": "0xa11871d61e0e703ae33b358a6a9653c43e4216f277d4a1c7377b76b4d5b4cbf1",
+        "logIndex": "0x196",
+        "removed": false
+      },
+      {
+        "address": "0x08f6db30039218894067023a3593baf27d3f4a2b",
+        "topics": [
+          "0x40c340f65e17194d14ddddb073d3c9f888e3cb52b5aae0c6c7706b4fbc905fac"
+        ],
+        "data": "0x00000000000000000000000059750ac0631f63bfdce0f0867618e468e11ee34700000000000000000000000000000000000000000000000000000000000000fa",
+        "blockNumber": "0xe3c1d8",
+        "transactionHash": "0x611b173b0e0dfda94da7bfb6cb77c9f1c03e2f2149ba060e6bddfaa219942369",
+        "transactionIndex": "0xdf",
+        "blockHash": "0xa11871d61e0e703ae33b358a6a9653c43e4216f277d4a1c7377b76b4d5b4cbf1",
+        "logIndex": "0x197",
+        "removed": false
+      }
+    ],
+    "logsBloom": "0x00000000000000800000000040000000000000000000000000000000000000000000008000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "status": "0x1",
+    "to": null,
+    "transactionIndex": "0xdf",
+    "type": "0x2"
+}
+"#,
+        )
+        .unwrap();
+
+        let receipt: TransactionReceipt = serde_json::from_value(v.clone()).unwrap();
+        assert!(receipt.to.is_none());
+        let receipt = serde_json::to_value(receipt).unwrap();
+        assert_eq!(v, receipt);
     }
 }

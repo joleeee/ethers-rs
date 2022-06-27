@@ -42,7 +42,7 @@ pub struct BlockTrace {
 
 //---------------- State Diff ----------------
 /// Aux type for Diff::Changed.
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct ChangedType<T> {
     /// Previous value.
     pub from: T,
@@ -51,7 +51,7 @@ pub struct ChangedType<T> {
 }
 
 /// Serde-friendly `Diff` shadow.
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub enum Diff<T> {
     /// No change.
     #[serde(rename = "=")]
@@ -68,7 +68,7 @@ pub enum Diff<T> {
 }
 
 /// Serde-friendly `AccountDiff` shadow.
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct AccountDiff {
     /// Account balance.
     pub balance: Diff<U256>,
@@ -81,12 +81,12 @@ pub struct AccountDiff {
 }
 
 /// Serde-friendly `StateDiff` shadow.
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct StateDiff(pub BTreeMap<H160, AccountDiff>);
 
 // ------------------ Trace -------------
 /// Trace
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 pub struct TransactionTrace {
     /// Trace address
     #[serde(rename = "traceAddress")]
@@ -130,7 +130,7 @@ pub struct VMOperation {
     pub sub: Option<VMTrace>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[allow(clippy::upper_case_acronyms)]
 /// A record of an executed VM operation.
 pub struct VMExecutedOperation {
@@ -147,7 +147,7 @@ pub struct VMExecutedOperation {
     pub store: Option<StorageDiff>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[allow(clippy::upper_case_acronyms)]
 /// A diff of some chunk of memory.
 pub struct MemoryDiff {
@@ -157,7 +157,7 @@ pub struct MemoryDiff {
     pub data: Bytes,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[allow(clippy::upper_case_acronyms)]
 /// A diff of some storage value.
 pub struct StorageDiff {

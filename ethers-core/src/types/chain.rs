@@ -1,11 +1,12 @@
-use serde::Deserialize;
-use thiserror::Error;
-
-use core::convert::TryFrom;
-use std::{convert::TryInto, default, fmt, str::FromStr};
-
 use crate::types::U256;
+use serde::Deserialize;
+use std::{
+    convert::{TryFrom, TryInto},
+    fmt,
+    str::FromStr,
+};
 use strum::EnumVariantNames;
+use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
 #[error("Failed to parse chain: {0}")]
@@ -26,12 +27,14 @@ pub enum Chain {
     Polygon = 137,
     Fantom = 250,
     Dev = 1337,
+    AnvilHardhat = 31337,
     FantomTestnet = 4002,
     PolygonMumbai = 80001,
     Avalanche = 43114,
     AvalancheFuji = 43113,
     Sepolia = 11155111,
-    Moonbeam = 1287,
+    Moonbeam = 1284,
+    Moonbase = 1287,
     MoonbeamDev = 1281,
     Moonriver = 1285,
     Optimism = 10,
@@ -44,6 +47,14 @@ pub enum Chain {
     BinanceSmartChain = 56,
     #[strum(serialize = "bsc-testnet")]
     BinanceSmartChainTestnet = 97,
+    Poa = 99,
+    Sokol = 77,
+    Rsk = 30,
+    Oasis = 26863,
+    Emerald = 42262,
+    EmeraldTestnet = 42261,
+    Evmos = 9001,
+    EvmosTestnet = 9000,
 }
 
 impl fmt::Display for Chain {
@@ -61,6 +72,7 @@ impl fmt::Display for Chain {
             Chain::AvalancheFuji => "avalanche-fuji",
             Chain::Sepolia => "sepolia",
             Chain::Moonbeam => "moonbeam",
+            Chain::Moonbase => "moonbase",
             Chain::MoonbeamDev => "moonbeam-dev",
             Chain::Moonriver => "moonriver",
             Chain::Optimism => "optimism",
@@ -74,6 +86,15 @@ impl fmt::Display for Chain {
             Chain::ArbitrumTestnet => "arbitrum-testnet",
             Chain::Cronos => "cronos",
             Chain::CronosTestnet => "cronos-testnet",
+            Chain::Poa => "poa",
+            Chain::Sokol => "sokol",
+            Chain::Rsk => "rsk",
+            Chain::Oasis => "oasis",
+            Chain::Emerald => "emerald",
+            Chain::EmeraldTestnet => "emerald-testnet",
+            Chain::AnvilHardhat => "anvil-hardhat",
+            Chain::Evmos => "evmos",
+            Chain::EvmosTestnet => "evmos-testnet",
         };
 
         write!(formatter, "{}", chain)
@@ -111,14 +132,16 @@ impl TryFrom<u64> for Chain {
             100 => Chain::XDai,
             137 => Chain::Polygon,
             1337 => Chain::Dev,
+            31337 => Chain::AnvilHardhat,
             250 => Chain::Fantom,
             4002 => Chain::FantomTestnet,
             80001 => Chain::PolygonMumbai,
             43114 => Chain::Avalanche,
             43113 => Chain::AvalancheFuji,
             11155111 => Chain::Sepolia,
-            1287 => Chain::Moonbeam,
-            1281 => Chain::MoonbeamDev,
+            1284 => Chain::Moonbeam,
+            1281 => Chain::Moonbase,
+            1287 => Chain::MoonbeamDev,
             1285 => Chain::Moonriver,
             10 => Chain::Optimism,
             69 => Chain::OptimismKovan,
@@ -128,6 +151,14 @@ impl TryFrom<u64> for Chain {
             421611 => Chain::ArbitrumTestnet,
             25 => Chain::Cronos,
             338 => Chain::CronosTestnet,
+            99 => Chain::Poa,
+            77 => Chain::Sokol,
+            30 => Chain::Rsk,
+            26863 => Chain::Oasis,
+            42262 => Chain::Emerald,
+            42261 => Chain::EmeraldTestnet,
+            9001 => Chain::Evmos,
+            9000 => Chain::EvmosTestnet,
             _ => return Err(ParseChainError(chain.to_string())),
         })
     }
@@ -167,12 +198,19 @@ impl FromStr for Chain {
             "fantom" => Chain::Fantom,
             "fantom-testnet" => Chain::FantomTestnet,
             "dev" => Chain::Dev,
+            "anvil" | "hardhat" | "anvil-hardhat" => Chain::AnvilHardhat,
             "bsc" => Chain::BinanceSmartChain,
             "bsc-testnet" => Chain::BinanceSmartChainTestnet,
             "arbitrum" => Chain::Arbitrum,
             "arbitrum-testnet" => Chain::ArbitrumTestnet,
             "cronos" => Chain::Cronos,
             "cronos-testnet" => Chain::CronosTestnet,
+            "poa" => Chain::Poa,
+            "sokol" => Chain::Sokol,
+            "rsk" => Chain::Rsk,
+            "oasis" => Chain::Oasis,
+            "emerald" => Chain::Emerald,
+            "emerald-testnet" => Chain::EmeraldTestnet,
             _ => return Err(ParseChainError(chain.to_owned())),
         })
     }
@@ -192,12 +230,16 @@ impl Chain {
                 Chain::BinanceSmartChain |
                 Chain::BinanceSmartChainTestnet |
                 Chain::Arbitrum |
-                Chain::ArbitrumTestnet,
+                Chain::ArbitrumTestnet |
+                Chain::Rsk |
+                Chain::Oasis |
+                Chain::Emerald |
+                Chain::EmeraldTestnet,
         )
     }
 }
 
-impl default::Default for Chain {
+impl Default for Chain {
     fn default() -> Self {
         Chain::Mainnet
     }

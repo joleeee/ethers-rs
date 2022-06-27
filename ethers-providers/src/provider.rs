@@ -1,10 +1,14 @@
 use crate::{
+    call_raw::CallBuilder,
     ens, erc, maybe,
     pubsub::{PubsubClient, SubscriptionStream},
     stream::{FilterWatcher, DEFAULT_POLL_INTERVAL},
-    FromErr, Http as HttpProvider, JsonRpcClient, JsonRpcClientWrapper, MockProvider,
+    FromErr, Http as HttpProvider, JsonRpcClient, JsonRpcClientWrapper, LogQuery, MockProvider,
     PendingTransaction, QuorumProvider, RwClient, SyncingStatus,
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::transports::{Authorization, HttpRateLimitRetryPolicy, RetryClient};
 
 #[cfg(feature = "celo")]
 use crate::CeloMiddleware;
@@ -226,6 +230,46 @@ impl<P: JsonRpcClient> Provider<P> {
                 self.request("eth_getBlockByNumber", [num, include_txs]).await?
             }
         })
+    }
+
+    /// Analogous to [`Middleware::call`], but returns a [`CallBuilder`] that can either be
+    /// `.await`d or used to override the parameters sent to `eth_call`.
+    ///
+    /// See the [`call_raw::spoof`] for functions to construct state override parameters.
+    ///
+    /// Note: this method _does not_ send a transaction from your account
+    ///
+    /// [`call_raw::spoof`]: crate::call_raw::spoof
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use ethers_core::{
+    /// #     types::{Address, TransactionRequest, H256},
+    /// #     utils::{parse_ether, Geth},
+    /// # };
+    /// # use ethers_providers::{Provider, Http, Middleware, call_raw::{RawCall, spoof}};
+    /// # use std::convert::TryFrom;
+    /// #
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let geth = Geth::new().spawn();
+    /// let provider = Provider::<Http>::try_from(geth.endpoint()).unwrap();
+    ///
+    /// let adr1: Address = "0x6fC21092DA55B392b045eD78F4732bff3C580e2c".parse()?;
+    /// let adr2: Address = "0x295a70b2de5e3953354a6a8344e616ed314d7251".parse()?;
+    /// let pay_amt = parse_ether(1u64)?;
+    ///
+    /// // Not enough ether to pay for the transaction
+    /// let tx = TransactionRequest::pay(adr2, pay_amt).from(adr1).into();
+    ///
+    /// // override the sender's balance for the call
+    /// let mut state = spoof::balance(adr1, pay_amt * 2);
+    /// provider.call_raw(&tx).state(&state).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn call_raw<'a>(&'a self, tx: &'a TypedTransaction) -> CallBuilder<'a, P> {
+        CallBuilder::new(self, tx)
     }
 }
 
@@ -539,7 +583,7 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
     }
 
     /// Returns the network version.
-    async fn get_net_version(&self) -> Result<U64, ProviderError> {
+    async fn get_net_version(&self) -> Result<String, ProviderError> {
         self.request("net_version", ()).await
     }
 
@@ -645,6 +689,10 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
     /// Returns an array (possibly empty) of logs that match the filter
     async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>, ProviderError> {
         self.request("eth_getLogs", [filter]).await
+    }
+
+    fn get_logs_paginated<'a>(&'a self, filter: &Filter, page_size: u64) -> LogQuery<'a, P> {
+        LogQuery::new(self, filter).with_page_size(page_size)
     }
 
     /// Streams matching filter logs
@@ -1140,17 +1188,30 @@ impl<P: JsonRpcClient> Middleware for Provider<P> {
         // The blockCount param is expected to be an unsigned integer up to geth v1.10.6.
         // Geth v1.10.7 onwards, this has been updated to a hex encoded form. Failure to
         // decode the param from client side would fallback to the old API spec.
-        self.request(
-            "eth_feeHistory",
-            [utils::serialize(&block_count), last_block.clone(), reward_percentiles.clone()],
-        )
-        .await
-        .or(self
-            .request(
+        match self
+            .request::<_, FeeHistory>(
                 "eth_feeHistory",
-                [utils::serialize(&block_count.as_u64()), last_block, reward_percentiles],
+                [utils::serialize(&block_count), last_block.clone(), reward_percentiles.clone()],
             )
-            .await)
+            .await
+        {
+            success @ Ok(_) => success,
+            err @ Err(_) => {
+                let fallback = self
+                    .request::<_, FeeHistory>(
+                        "eth_feeHistory",
+                        [utils::serialize(&block_count.as_u64()), last_block, reward_percentiles],
+                    )
+                    .await;
+
+                if fallback.is_err() {
+                    // if the older fallback also resulted in an error, we return the error from the
+                    // initial attempt
+                    return err
+                }
+                fallback
+            }
+        }
     }
 }
 
@@ -1197,7 +1258,7 @@ impl<P: JsonRpcClient> Provider<P> {
     }
 
     #[cfg(test)]
-    /// ganache-only function for mining empty blocks
+    /// Anvil and Ganache-only function for mining empty blocks
     pub async fn mine(&self, num_blocks: usize) -> Result<(), ProviderError> {
         for _ in 0..num_blocks {
             self.inner.request::<_, U256>("evm_mine", None::<()>).await.map_err(Into::into)?;
@@ -1235,6 +1296,15 @@ impl Provider<crate::Ws> {
         url: impl tokio_tungstenite::tungstenite::client::IntoClientRequest + Unpin,
     ) -> Result<Self, ProviderError> {
         let ws = crate::Ws::connect(url).await?;
+        Ok(Self::new(ws))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn connect_with_auth(
+        url: impl tokio_tungstenite::tungstenite::client::IntoClientRequest + Unpin,
+        auth: Authorization,
+    ) -> Result<Self, ProviderError> {
+        let ws = crate::Ws::connect_with_auth(url, auth).await?;
         Ok(Self::new(ws))
     }
 
@@ -1339,6 +1409,18 @@ impl<'a> TryFrom<&'a String> for Provider<HttpProvider> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl Provider<RetryClient<HttpProvider>> {
+    pub fn new_client(src: &str, max_retry: u32, initial_backoff: u64) -> Result<Self, ParseError> {
+        Ok(Provider::new(RetryClient::new(
+            HttpProvider::new(Url::parse(src)?),
+            Box::new(HttpRateLimitRetryPolicy),
+            max_retry,
+            initial_backoff,
+        )))
+    }
+}
+
 /// A middleware supporting development-specific JSON RPC methods
 ///
 /// # Example
@@ -1346,13 +1428,13 @@ impl<'a> TryFrom<&'a String> for Provider<HttpProvider> {
 ///```
 /// use ethers_providers::{Provider, Http, Middleware, DevRpcMiddleware};
 /// use ethers_core::types::TransactionRequest;
-/// use ethers_core::utils::Ganache;
+/// use ethers_core::utils::Anvil;
 /// use std::convert::TryFrom;
 ///
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let ganache = Ganache::new().spawn();
-/// let provider = Provider::<Http>::try_from(ganache.endpoint()).unwrap();
+/// let anvil = Anvil::new().spawn();
+/// let provider = Provider::<Http>::try_from(anvil.endpoint()).unwrap();
 /// let client = DevRpcMiddleware::new(provider);
 ///
 /// // snapshot the initial state
@@ -1431,7 +1513,7 @@ pub mod dev_rpc {
             Self(inner)
         }
 
-        // both ganache and hardhat increment snapshot id even if no state has changed
+        // Ganache, Hardhat and Anvil increment snapshot ID even if no state has changed
         pub async fn snapshot(&self) -> Result<U256, DevRpcMiddlewareError<M>> {
             self.provider().request::<(), U256>("evm_snapshot", ()).await.map_err(From::from)
         }
@@ -1455,14 +1537,13 @@ pub mod dev_rpc {
     mod tests {
         use super::*;
         use crate::{Http, Provider};
-        use ethers_core::utils::Ganache;
+        use ethers_core::utils::Anvil;
         use std::convert::TryFrom;
 
         #[tokio::test]
         async fn test_snapshot() {
-            // launch ganache
-            let ganache = Ganache::new().spawn();
-            let provider = Provider::<Http>::try_from(ganache.endpoint()).unwrap();
+            let anvil = Anvil::new().spawn();
+            let provider = Provider::<Http>::try_from(anvil.endpoint()).unwrap();
             let client = DevRpcMiddleware::new(provider);
 
             // snapshot initial state
@@ -1525,7 +1606,7 @@ mod tests {
         types::{
             transaction::eip2930::AccessList, Eip1559TransactionRequest, TransactionRequest, H256,
         },
-        utils::Geth,
+        utils::Anvil,
     };
     use futures_util::StreamExt;
 
@@ -1579,6 +1660,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn mainnet_resolve_avatar() {
         let provider = crate::MAINNET.provider();
 
@@ -1586,7 +1668,7 @@ mod tests {
             // HTTPS
             ("alisha.eth", "https://ipfs.io/ipfs/QmeQm91kAdPGnUKsE74WvkqYKUeHvc2oHd2FW11V3TrqkQ"),
             // ERC-1155
-            ("nick.eth", "https://lh3.googleusercontent.com/hKHZTZSTmcznonu8I6xcVZio1IF76fq0XmcxnvUykC-FGuVJ75UPdLDlKJsfgVXH9wOSmkyHw0C39VAYtsGyxT7WNybjQ6s3fM3macE"),
+            ("nick.eth", "https://img.seadn.io/files/3ae7be6c41ad4767bf3ecbc0493b4bfb.png"),
             // HTTPS
             ("parishilton.eth", "https://i.imgur.com/YW3Hzph.jpg"),
             // ERC-721 with IPFS link
@@ -1606,7 +1688,7 @@ mod tests {
     #[cfg_attr(feature = "celo", ignore)]
     async fn test_new_block_filter() {
         let num_blocks = 3;
-        let geth = Geth::new().block_time(2u64).spawn();
+        let geth = Anvil::new().block_time(2u64).spawn();
         let provider = Provider::<Http>::try_from(geth.endpoint())
             .unwrap()
             .interval(Duration::from_millis(1000));
@@ -1625,16 +1707,15 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(feature = "celo", ignore)]
     async fn test_is_signer() {
-        use ethers_core::utils::Ganache;
+        use ethers_core::utils::Anvil;
         use std::str::FromStr;
 
-        let ganache = Ganache::new().spawn();
-        let provider = Provider::<Http>::try_from(ganache.endpoint())
-            .unwrap()
-            .with_sender(ganache.addresses()[0]);
+        let anvil = Anvil::new().spawn();
+        let provider =
+            Provider::<Http>::try_from(anvil.endpoint()).unwrap().with_sender(anvil.addresses()[0]);
         assert!(provider.is_signer().await);
 
-        let provider = Provider::<Http>::try_from(ganache.endpoint()).unwrap();
+        let provider = Provider::<Http>::try_from(anvil.endpoint()).unwrap();
         assert!(!provider.is_signer().await);
 
         let sender = Address::from_str("635B4764D1939DfAcD3a8014726159abC277BecC")
@@ -1651,7 +1732,7 @@ mod tests {
     async fn test_new_pending_txs_filter() {
         let num_txs = 5;
 
-        let geth = Geth::new().block_time(2u64).spawn();
+        let geth = Anvil::new().block_time(2u64).spawn();
         let provider = Provider::<Http>::try_from(geth.endpoint())
             .unwrap()
             .interval(Duration::from_millis(1000));
@@ -1674,10 +1755,10 @@ mod tests {
     async fn receipt_on_unmined_tx() {
         use ethers_core::{
             types::TransactionRequest,
-            utils::{parse_ether, Ganache},
+            utils::{parse_ether, Anvil},
         };
-        let ganache = Ganache::new().block_time(2u64).spawn();
-        let provider = Provider::<Http>::try_from(ganache.endpoint()).unwrap();
+        let anvil = Anvil::new().block_time(2u64).spawn();
+        let provider = Provider::<Http>::try_from(anvil.endpoint()).unwrap();
 
         let accounts = provider.get_accounts().await.unwrap();
         let tx = TransactionRequest::pay(accounts[0], parse_ether(1u64).unwrap()).from(accounts[0]);
@@ -1705,10 +1786,10 @@ mod tests {
     // Celo blocks can not get parsed when used with Ganache
     #[cfg(not(feature = "celo"))]
     async fn block_subscribe() {
-        use ethers_core::utils::Ganache;
+        use ethers_core::utils::Anvil;
         use futures_util::StreamExt;
-        let ganache = Ganache::new().block_time(2u64).spawn();
-        let provider = Provider::connect(ganache.ws_endpoint()).await.unwrap();
+        let anvil = Anvil::new().block_time(2u64).spawn();
+        let provider = Provider::connect(anvil.ws_endpoint()).await.unwrap();
 
         let stream = provider.subscribe_blocks().await.unwrap();
         let blocks = stream.take(3).map(|x| x.number.unwrap().as_u64()).collect::<Vec<_>>().await;

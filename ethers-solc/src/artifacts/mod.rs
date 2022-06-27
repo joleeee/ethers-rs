@@ -1,21 +1,18 @@
 //! Solc artifact types
-use ethers_core::abi::Abi;
-
+use crate::{
+    compile::*, error::SolcIoError, remappings::Remapping, utils, ProjectPathsConfig, SolcError,
+};
 use colored::Colorize;
+use ethers_core::abi::Abi;
 use md5::Digest;
 use semver::{Version, VersionReq};
+use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     collections::{BTreeMap, HashSet},
     fmt, fs,
     path::{Path, PathBuf},
     str::FromStr,
 };
-
-use crate::{
-    compile::*, error::SolcIoError, remappings::Remapping, utils, ProjectPathsConfig, SolcError,
-};
-
-use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use tracing::warn;
 
 pub mod ast;
@@ -106,6 +103,8 @@ impl CompilerInput {
             once_cell::sync::Lazy::new(|| VersionReq::parse("<0.6.0").unwrap());
         static PRE_V0_8_10: once_cell::sync::Lazy<VersionReq> =
             once_cell::sync::Lazy::new(|| VersionReq::parse("<0.8.10").unwrap());
+        static PRE_V0_7_5: once_cell::sync::Lazy<VersionReq> =
+            once_cell::sync::Lazy::new(|| VersionReq::parse("<0.7.5").unwrap());
 
         if PRE_V0_6_0.matches(version) {
             if let Some(ref mut meta) = self.settings.metadata {
@@ -126,6 +125,11 @@ impl CompilerInput {
 
             // 0.8.10 is the earliest version that has all model checker options.
             self.settings.model_checker = None;
+        }
+
+        if PRE_V0_7_5.matches(version) {
+            // introduced in 0.7.5 <https://github.com/ethereum/solidity/releases/tag/v0.7.5>
+            self.settings.via_ir.take();
         }
 
         self
@@ -182,9 +186,19 @@ impl CompilerInput {
         self.sources = self
             .sources
             .into_iter()
-            .map(|(path, s)| (path.strip_prefix(base).map(|p| p.to_path_buf()).unwrap_or(path), s))
+            .map(|(path, s)| (path.strip_prefix(base).map(Into::into).unwrap_or(path), s))
             .collect();
         self
+    }
+
+    /// Similar to `Self::strip_prefix()`. Remove a base path from all
+    /// sources _and_ all paths in solc settings such as remappings
+    ///
+    /// See also `solc --base-path`
+    pub fn with_base_path(mut self, base: impl AsRef<Path>) -> Self {
+        let base = base.as_ref();
+        self.settings = self.settings.with_base_path(base);
+        self.strip_prefix(base)
     }
 }
 
@@ -275,7 +289,7 @@ pub struct Settings {
     /// If remappings are used, this source file should match the global path
     /// after remappings were applied.
     /// If this key is an empty string, that refers to a global level.
-    #[serde(default, skip_serializing_if = "Libraries::is_empty")]
+    #[serde(default)]
     pub libraries: Libraries,
 }
 
@@ -376,6 +390,38 @@ impl Settings {
         let output =
             self.output_selection.as_mut().entry("*".to_string()).or_insert_with(BTreeMap::default);
         output.insert("".to_string(), vec!["ast".to_string()]);
+        self
+    }
+
+    /// Strips `base` from all paths
+    pub fn with_base_path(mut self, base: impl AsRef<Path>) -> Self {
+        let base = base.as_ref();
+        self.remappings.iter_mut().for_each(|r| {
+            r.strip_prefix(base);
+        });
+
+        self.libraries.libs = self
+            .libraries
+            .libs
+            .into_iter()
+            .map(|(file, libs)| (file.strip_prefix(base).map(Into::into).unwrap_or(file), libs))
+            .collect();
+
+        self.output_selection = OutputSelection(
+            self.output_selection
+                .0
+                .into_iter()
+                .map(|(file, selection)| {
+                    (
+                        Path::new(&file)
+                            .strip_prefix(base)
+                            .map(|p| format!("{}", p.display()))
+                            .unwrap_or(file),
+                        selection,
+                    )
+                })
+                .collect(),
+        );
         self
     }
 }
@@ -810,15 +856,76 @@ pub struct Metadata {
     pub version: i64,
 }
 
+/// A helper type that ensures lossless (de)serialisation so we can preserve the exact String
+/// metadata value that's being hashed by solc
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LosslessMetadata {
+    /// The complete abi as json value
+    pub raw_metadata: String,
+    /// The deserialised metadata of `raw_metadata`
+    pub metadata: Metadata,
+}
+
+// === impl LosslessMetadata ===
+
+impl LosslessMetadata {
+    /// Returns the whole string raw metadata as `serde_json::Value`
+    pub fn raw_json(&self) -> serde_json::Result<serde_json::Value> {
+        serde_json::from_str(&self.raw_metadata)
+    }
+}
+
+impl Serialize for LosslessMetadata {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.raw_metadata.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for LosslessMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct LosslessMetadataVisitor;
+
+        impl<'de> Visitor<'de> for LosslessMetadataVisitor {
+            type Value = LosslessMetadata;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(formatter, "metadata string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let raw_metadata = value.to_string();
+                let metadata = serde_json::from_str(value).map_err(serde::de::Error::custom)?;
+                Ok(LosslessMetadata { raw_metadata, metadata })
+            }
+        }
+        deserializer.deserialize_str(LosslessMetadataVisitor)
+    }
+}
+
 /// Compiler settings
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataSettings {
+    #[serde(default)]
+    pub remappings: Vec<Remapping>,
+    pub optimizer: Optimizer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SettingsMetadata>,
     /// Required for Solidity: File and name of the contract or library this metadata is created
     /// for.
     #[serde(default, rename = "compilationTarget")]
     pub compilation_target: BTreeMap<String, String>,
-    #[serde(flatten)]
-    pub inner: Settings,
+    /// Metadata settings
+    #[serde(default)]
+    pub libraries: Libraries,
 }
 
 /// Compilation source files/source units, keys are file names
@@ -964,9 +1071,9 @@ pub struct Output {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SolcAbi {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub inputs: Vec<Item>,
-    #[serde(rename = "stateMutability")]
+    #[serde(rename = "stateMutability", skip_serializing_if = "Option::is_none")]
     pub state_mutability: Option<String>,
     #[serde(rename = "type")]
     pub abi_type: String,
@@ -974,6 +1081,9 @@ pub struct SolcAbi {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<Item>,
+    // required to satisfy solidity events
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anonymous: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -983,6 +1093,11 @@ pub struct Item {
     pub name: String,
     #[serde(rename = "type")]
     pub put_type: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<Item>,
+    /// Indexed flag. for solidity events
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1258,12 +1373,18 @@ impl OutputContracts {
 /// ethabi as it would require a redesign of the overall `Param` and `ParamType` types. Instead,
 /// this type keeps a copy of the [`serde_json::Value`] when deserialized from the `solc` json
 /// compiler output and uses it to serialize the `abi` without loss.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LosslessAbi {
     /// The complete abi as json value
     pub abi_value: serde_json::Value,
     /// The deserialised version of `abi_value`
     pub abi: Abi,
+}
+
+impl Default for LosslessAbi {
+    fn default() -> Self {
+        LosslessAbi { abi_value: serde_json::json!([]), abi: Default::default() }
+    }
 }
 
 impl From<LosslessAbi> for Abi {
@@ -1299,15 +1420,21 @@ pub struct UserDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
-    pub methods: BTreeMap<String, MethodNotice>,
+    pub methods: BTreeMap<String, UserDocNotice>,
+    #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
+    pub events: BTreeMap<String, UserDocNotice>,
+    #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
+    pub errors: BTreeMap<String, Vec<UserDocNotice>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
-pub struct MethodNotice {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notice: Option<String>,
+#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(untagged)]
+pub enum UserDocNotice {
+    // NOTE: this a variant used for constructors on older solc versions
+    Constructor(String),
+    Notice { notice: String },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
@@ -1324,6 +1451,10 @@ pub struct DevDoc {
     pub custom_experimental: Option<String>,
     #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
     pub methods: BTreeMap<String, MethodDoc>,
+    #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
+    pub events: BTreeMap<String, EventDoc>,
+    #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
+    pub errors: BTreeMap<String, Vec<ErrorDoc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 }
@@ -1334,8 +1465,24 @@ pub struct MethodDoc {
     pub details: Option<String>,
     #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
     pub params: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
+    pub returns: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+pub struct EventDoc {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub r#return: Option<String>,
+    pub details: Option<String>,
+    #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ErrorDoc {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+    #[serde(default, skip_serializing_if = "::std::collections::BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
@@ -1630,6 +1777,22 @@ pub struct SourceFile {
     pub id: u32,
     #[serde(default, with = "serde_helpers::empty_json_object_opt")]
     pub ast: Option<Ast>,
+}
+
+// === impl SourceFile ===
+
+impl SourceFile {
+    /// Returns `true` if the source file contains at least 1 `ContractDefinition` such as
+    /// `contract`, `abstract contract`, `interface` or `library`
+    pub fn contains_contract_definition(&self) -> bool {
+        if let Some(ref ast) = self.ast {
+            // contract definitions are only allowed at the source-unit level <https://docs.soliditylang.org/en/latest/grammar.html>
+            return ast.nodes.iter().any(|node| node.node_type == NodeType::ContractDefinition)
+            // abstract contract, interfaces: ContractDefinition
+        }
+
+        false
+    }
 }
 
 /// A wrapper type for a list of source files

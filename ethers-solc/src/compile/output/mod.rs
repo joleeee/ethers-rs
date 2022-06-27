@@ -5,14 +5,17 @@ use crate::{
         contract::{CompactContractBytecode, CompactContractRef, Contract},
         Error,
     },
+    buildinfo::RawBuildInfo,
     sources::{VersionedSourceFile, VersionedSourceFiles},
-    ArtifactId, ArtifactOutput, Artifacts, CompilerOutput, ConfigurableArtifacts,
+    ArtifactId, ArtifactOutput, Artifacts, CompilerOutput, ConfigurableArtifacts, SolcIoError,
 };
 use contracts::{VersionedContract, VersionedContracts};
 use semver::Version;
 use std::{collections::BTreeMap, fmt, path::Path};
+use tracing::trace;
 
 pub mod contracts;
+pub mod info;
 pub mod sources;
 
 /// Contains a mixture of already compiled/cached artifacts and the input set of sources that still
@@ -73,6 +76,11 @@ impl<T: ArtifactOutput> ProjectCompileOutput<T> {
     }
 
     /// All artifacts together with their ID and the sources of the project.
+    ///
+    /// Note: this only returns the `SourceFiles` for freshly compiled contracts because, if not
+    /// included in the `Artifact` itself (see
+    /// [`crate::ConfigurableContractArtifact::source_file()`]), is only available via the solc
+    /// `CompilerOutput`
     pub fn into_artifacts_with_sources(
         self,
     ) -> (BTreeMap<ArtifactId, T::Artifact>, VersionedSourceFiles) {
@@ -238,6 +246,8 @@ pub struct AggregatedCompilerOutput {
     pub sources: VersionedSourceFiles,
     /// All compiled contracts combined with the solc version used to compile them
     pub contracts: VersionedContracts,
+    // All the `BuildInfo`s of solc invocations.
+    pub build_infos: BTreeMap<Version, RawBuildInfo>,
 }
 
 impl AggregatedCompilerOutput {
@@ -297,6 +307,29 @@ impl AggregatedCompilerOutput {
         }
     }
 
+    /// Creates all `BuildInfo` files in the given `build_info_dir`
+    ///
+    /// There can be multiple `BuildInfo`, since we support multiple versions.
+    ///
+    /// The created files have the md5 hash `{_format,solcVersion,solcLongVersion,input}` as their
+    /// file name
+    pub fn write_build_infos(&self, build_info_dir: impl AsRef<Path>) -> Result<(), SolcIoError> {
+        if self.build_infos.is_empty() {
+            return Ok(())
+        }
+        let build_info_dir = build_info_dir.as_ref();
+        std::fs::create_dir_all(build_info_dir)
+            .map_err(|err| SolcIoError::new(err, build_info_dir))?;
+        for (version, build_info) in &self.build_infos {
+            trace!("writing build info file for solc {}", version);
+            let file_name = format!("{}.json", build_info.id);
+            let file = build_info_dir.join(file_name);
+            std::fs::write(&file, &build_info.build_info)
+                .map_err(|err| SolcIoError::new(err, file))?;
+        }
+        Ok(())
+    }
+
     /// Finds the _first_ contract with the given name
     ///
     /// # Example
@@ -322,11 +355,27 @@ impl AggregatedCompilerOutput {
     /// use ethers_solc::artifacts::*;
     /// # fn demo(project: Project) {
     /// let mut output = project.compile().unwrap().output();
-    /// let contract = output.remove("Greeter").unwrap();
+    /// let contract = output.remove_first("Greeter").unwrap();
     /// # }
     /// ```
-    pub fn remove(&mut self, contract: impl AsRef<str>) -> Option<Contract> {
-        self.contracts.remove(contract)
+    pub fn remove_first(&mut self, contract: impl AsRef<str>) -> Option<Contract> {
+        self.contracts.remove_first(contract)
+    }
+
+    /// Removes the contract with matching path and name
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ethers_solc::Project;
+    /// use ethers_solc::artifacts::*;
+    /// # fn demo(project: Project) {
+    /// let mut output = project.compile().unwrap().output();
+    /// let contract = output.remove("src/Greeter.sol", "Greeter").unwrap();
+    /// # }
+    /// ```
+    pub fn remove(&mut self, path: impl AsRef<str>, contract: impl AsRef<str>) -> Option<Contract> {
+        self.contracts.remove(path, contract)
     }
 
     /// Iterate over all contracts and their names
@@ -341,7 +390,21 @@ impl AggregatedCompilerOutput {
 
     /// Given the contract file's path and the contract's name, tries to return the contract's
     /// bytecode, runtime bytecode, and abi
-    pub fn get(&self, path: &str, contract: &str) -> Option<CompactContractRef> {
+    /// # Example
+    ///
+    /// ```
+    /// use ethers_solc::Project;
+    /// use ethers_solc::artifacts::*;
+    /// # fn demo(project: Project) {
+    /// let output = project.compile().unwrap().output();
+    /// let contract = output.get("src/Greeter.sol", "Greeter").unwrap();
+    /// # }
+    /// ```
+    pub fn get(
+        &self,
+        path: impl AsRef<str>,
+        contract: impl AsRef<str>,
+    ) -> Option<CompactContractRef> {
         self.contracts.get(path, contract)
     }
 
@@ -359,6 +422,14 @@ impl AggregatedCompilerOutput {
     /// ```
     pub fn split(self) -> (VersionedSourceFiles, VersionedContracts) {
         (self.sources, self.contracts)
+    }
+
+    /// Joins all file path with `root`
+    pub fn join_all(&mut self, root: impl AsRef<Path>) -> &mut Self {
+        let root = root.as_ref();
+        self.contracts.join_all(root);
+        self.sources.join_all(root);
+        self
     }
 
     /// Strips the given prefix from all file paths to make them relative to the given

@@ -1,10 +1,11 @@
 #![cfg(feature = "abigen")]
+#![allow(unused)]
 //! Test cases to validate the `abigen!` macro
 use ethers_contract::{abigen, EthCall, EthEvent};
 use ethers_core::{
     abi::{AbiDecode, AbiEncode, Address, Tokenizable},
     types::{transaction::eip2718::TypedTransaction, Eip1559TransactionRequest, U256},
-    utils::Ganache,
+    utils::Anvil,
 };
 use ethers_middleware::SignerMiddleware;
 use ethers_providers::{MockProvider, Provider};
@@ -305,10 +306,10 @@ async fn can_handle_underscore_functions() {
         "ethers-contract/tests/solidity-contracts/simplestorage_abi.json",
     );
 
-    // launcht the network & connect to it
-    let ganache = ethers_core::utils::Ganache::new().spawn();
-    let from = ganache.addresses()[0];
-    let provider = Provider::try_from(ganache.endpoint())
+    // launch the network & connect to it
+    let anvil = Anvil::new().spawn();
+    let from = anvil.addresses()[0];
+    let provider = Provider::try_from(anvil.endpoint())
         .unwrap()
         .with_sender(from)
         .interval(std::time::Duration::from_millis(10));
@@ -484,9 +485,9 @@ fn can_handle_case_sensitive_calls() {
 #[tokio::test]
 async fn can_deploy_greeter() {
     abigen!(Greeter, "ethers-contract/tests/solidity-contracts/greeter.json",);
-    let ganache = ethers_core::utils::Ganache::new().spawn();
-    let from = ganache.addresses()[0];
-    let provider = Provider::try_from(ganache.endpoint())
+    let anvil = Anvil::new().spawn();
+    let from = anvil.addresses()[0];
+    let provider = Provider::try_from(anvil.endpoint())
         .unwrap()
         .with_sender(from)
         .interval(std::time::Duration::from_millis(10));
@@ -502,9 +503,9 @@ async fn can_deploy_greeter() {
 #[tokio::test]
 async fn can_abiencoderv2_output() {
     abigen!(AbiEncoderv2Test, "ethers-contract/tests/solidity-contracts/abiencoderv2test_abi.json",);
-    let ganache = ethers_core::utils::Ganache::new().spawn();
-    let from = ganache.addresses()[0];
-    let provider = Provider::try_from(ganache.endpoint())
+    let anvil = Anvil::new().spawn();
+    let from = anvil.addresses()[0];
+    let provider = Provider::try_from(anvil.endpoint())
         .unwrap()
         .with_sender(from)
         .interval(std::time::Duration::from_millis(10));
@@ -575,7 +576,7 @@ fn can_handle_overloaded_events() {
 async fn can_send_struct_param() {
     abigen!(StructContract, "./tests/solidity-contracts/StructContract.json");
 
-    let server = Ganache::default().spawn();
+    let server = Anvil::new().spawn();
     let wallet: LocalWallet = server.keys()[0].clone().into();
     let provider = Provider::try_from(server.endpoint()).unwrap();
     let client = Arc::new(SignerMiddleware::new(provider, wallet.with_chain_id(1337u64)));
@@ -589,4 +590,39 @@ async fn can_send_struct_param() {
 
     let logs: Vec<NewPointFilter> = contract.event().from_block(0u64).query().await.unwrap();
     assert_eq!(logs.len(), 1);
+}
+
+#[test]
+fn can_gen_seaport() {
+    abigen!(Seaport, "./tests/solidity-contracts/seaport.json");
+
+    assert_eq!(
+        FulfillAdvancedOrderCall::abi_signature(),
+        "fulfillAdvancedOrder(((address,address,(uint8,address,uint256,uint256,uint256)[],(uint8,address,uint256,uint256,uint256,address)[],uint8,uint256,uint256,bytes32,uint256,bytes32,uint256),uint120,uint120,bytes,bytes),(uint256,uint8,uint256,uint256,bytes32[])[],bytes32,address)"
+    );
+    assert_eq!(hex::encode(FulfillAdvancedOrderCall::selector()), "e7acab24");
+}
+
+#[test]
+fn can_generate_to_string_overload() {
+    abigen!(
+        ToString,
+        r#"[
+                toString(bytes)
+                toString(address)
+                toString(uint256)
+                toString(int256)
+                toString(bytes32)
+                toString(bool)
+    ]"#
+    );
+
+    match ToStringCalls::ToString0(ToString0Call(Default::default())) {
+        ToStringCalls::ToString0(_) => {}
+        ToStringCalls::ToString1(_) => {}
+        ToStringCalls::ToString2(_) => {}
+        ToStringCalls::ToString3(_) => {}
+        ToStringCalls::ToString4(_) => {}
+        ToStringCalls::ToString5(_) => {}
+    };
 }

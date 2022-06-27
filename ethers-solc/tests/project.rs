@@ -2,14 +2,18 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    io,
+    fs, io,
     path::{Path, PathBuf},
     str::FromStr,
 };
 
 use ethers_core::types::Address;
 use ethers_solc::{
-    artifacts::{BytecodeHash, Libraries, ModelCheckerEngine::CHC, ModelCheckerSettings},
+    artifacts::{
+        BytecodeHash, DevDoc, ErrorDoc, EventDoc, Libraries, MethodDoc, ModelCheckerEngine::CHC,
+        ModelCheckerSettings, UserDoc, UserDocNotice,
+    },
+    buildinfo::BuildInfo,
     cache::{SolFilesCache, SOLIDITY_FILES_CACHE_FILENAME},
     project_util::*,
     remappings::Remapping,
@@ -145,6 +149,7 @@ fn can_compile_configured() {
     let compiled = project.compile().unwrap();
     let artifact = compiled.find("Dapp").unwrap();
     assert!(artifact.metadata.is_some());
+    assert!(artifact.raw_metadata.is_some());
     assert!(artifact.ir.is_some());
     assert!(artifact.ir_optimized.is_some());
 }
@@ -305,6 +310,45 @@ fn can_compile_dapp_detect_changes_in_sources() {
         let other = artifacts.remove(&p).unwrap();
         assert_ne!(artifact, other);
     }
+}
+
+#[test]
+fn can_emit_build_info() {
+    let mut project = TempProject::dapptools().unwrap();
+    project.project_mut().build_info = true;
+    project
+        .add_source(
+            "A",
+            r#"
+pragma solidity ^0.8.10;
+import "./B.sol";
+contract A { }
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "B",
+            r#"
+pragma solidity ^0.8.10;
+contract B { }
+"#,
+        )
+        .unwrap();
+
+    let compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    let info_dir = project.project().build_info_path();
+    assert!(info_dir.exists());
+
+    let mut build_info_count = 0;
+    for entry in fs::read_dir(info_dir).unwrap() {
+        let _info = BuildInfo::read(entry.unwrap().path()).unwrap();
+        build_info_count += 1;
+    }
+    assert_eq!(build_info_count, 1);
 }
 
 #[test]
@@ -871,6 +915,71 @@ contract Contract is ParentContract,
 }
 
 #[test]
+fn can_flatten_with_version_pragma_after_imports() {
+    let project = TempProject::dapptools().unwrap();
+
+    let f = project
+        .add_source(
+            "A",
+            r#"
+pragma solidity ^0.8.10;
+
+import * as B from "./B.sol";
+
+contract A { }
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "B",
+            r#"
+import D from "./D.sol";
+pragma solidity ^0.8.10;
+import * as C from "./C.sol";
+contract B { }
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "C",
+            r#"
+pragma solidity ^0.8.10;
+contract C { }
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "D",
+            r#"
+pragma solidity ^0.8.10;
+contract D { }
+"#,
+        )
+        .unwrap();
+
+    let result = project.flatten(&f).unwrap();
+    assert_eq!(
+        result,
+        r#"pragma solidity ^0.8.10;
+
+contract D { }
+
+contract C { }
+
+contract B { }
+
+contract A { }
+"#
+    );
+}
+
+#[test]
 fn can_detect_type_error() {
     let project = TempProject::<ConfigurableArtifacts>::dapptools().unwrap();
 
@@ -1237,6 +1346,159 @@ fn can_recompile_unchanged_with_empty_files() {
 }
 
 #[test]
+fn can_emit_empty_artifacts() {
+    let tmp = TempProject::dapptools().unwrap();
+
+    let top_level = tmp
+        .add_source(
+            "top_level",
+            r#"
+    function test() {}
+   "#,
+        )
+        .unwrap();
+
+    tmp.add_source(
+        "Contract",
+        r#"
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.10;
+
+import "./top_level.sol";
+
+contract Contract {
+    function a() public{
+        test();
+    }
+}
+   "#,
+    )
+    .unwrap();
+
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+    assert!(compiled.find("Contract").is_some());
+    assert!(compiled.find("top_level").is_some());
+    let mut artifacts = tmp.artifacts_snapshot().unwrap();
+
+    assert_eq!(artifacts.artifacts.as_ref().len(), 2);
+
+    let mut top_level =
+        artifacts.artifacts.as_mut().remove(top_level.to_string_lossy().as_ref()).unwrap();
+
+    assert_eq!(top_level.len(), 1);
+
+    let artifact = top_level.remove("top_level").unwrap().remove(0);
+    assert!(artifact.artifact.ast.is_some());
+
+    // recompile
+    let compiled = tmp.compile().unwrap();
+    assert!(compiled.is_unchanged());
+
+    // modify standalone file
+
+    tmp.add_source(
+        "top_level",
+        r#"
+    error MyError();
+    function test() {}
+   "#,
+    )
+    .unwrap();
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.is_unchanged());
+}
+
+#[test]
+fn can_detect_contract_def_source_files() {
+    let tmp = TempProject::dapptools().unwrap();
+
+    let mylib = tmp
+        .add_source(
+            "MyLib",
+            r#"
+        pragma solidity 0.8.10;
+        library MyLib {
+        }
+   "#,
+        )
+        .unwrap();
+
+    let myinterface = tmp
+        .add_source(
+            "MyInterface",
+            r#"
+        pragma solidity 0.8.10;
+        interface MyInterface {}
+   "#,
+        )
+        .unwrap();
+
+    let mycontract = tmp
+        .add_source(
+            "MyContract",
+            r#"
+        pragma solidity 0.8.10;
+        contract MyContract {}
+   "#,
+        )
+        .unwrap();
+
+    let myabstract_contract = tmp
+        .add_source(
+            "MyAbstractContract",
+            r#"
+        pragma solidity 0.8.10;
+        contract MyAbstractContract {}
+   "#,
+        )
+        .unwrap();
+
+    let myerr = tmp
+        .add_source(
+            "MyError",
+            r#"
+        pragma solidity 0.8.10;
+       error MyError();
+   "#,
+        )
+        .unwrap();
+
+    let myfunc = tmp
+        .add_source(
+            "MyFunction",
+            r#"
+        pragma solidity 0.8.10;
+        function abc(){}
+   "#,
+        )
+        .unwrap();
+
+    let compiled = tmp.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    let mut sources = compiled.output().sources;
+    let myfunc = sources.remove_by_path(myfunc.to_string_lossy()).unwrap();
+    assert!(!myfunc.contains_contract_definition());
+
+    let myerr = sources.remove_by_path(myerr.to_string_lossy()).unwrap();
+    assert!(!myerr.contains_contract_definition());
+
+    let mylib = sources.remove_by_path(mylib.to_string_lossy()).unwrap();
+    assert!(mylib.contains_contract_definition());
+
+    let myabstract_contract =
+        sources.remove_by_path(myabstract_contract.to_string_lossy()).unwrap();
+    assert!(myabstract_contract.contains_contract_definition());
+
+    let myinterface = sources.remove_by_path(myinterface.to_string_lossy()).unwrap();
+    assert!(myinterface.contains_contract_definition());
+
+    let mycontract = sources.remove_by_path(mycontract.to_string_lossy()).unwrap();
+    assert!(mycontract.contains_contract_definition());
+}
+
+#[test]
 fn can_compile_sparse_with_link_references() {
     let tmp = TempProject::dapptools().unwrap();
 
@@ -1254,24 +1516,40 @@ fn can_compile_sparse_with_link_references() {
     )
     .unwrap();
 
-    tmp.add_source(
-        "mylib.sol",
-        r#"
+    let my_lib_path = tmp
+        .add_source(
+            "mylib.sol",
+            r#"
     pragma solidity =0.8.12;
     library MyLib {
        function doStuff() external pure returns (uint256) {return 1337;}
     }
    "#,
-    )
-    .unwrap();
+        )
+        .unwrap();
 
     let mut compiled = tmp.compile_sparse(TestFileFilter::default()).unwrap();
     assert!(!compiled.has_compiler_errors());
+
+    let mut output = compiled.clone().output();
 
     assert!(compiled.find("ATest").is_some());
     assert!(compiled.find("MyLib").is_some());
     let lib = compiled.remove("MyLib").unwrap();
     assert!(lib.bytecode.is_some());
+    let lib = compiled.remove("MyLib");
+    assert!(lib.is_none());
+
+    let mut dup = output.clone();
+    let lib = dup.remove_first("MyLib");
+    assert!(lib.is_some());
+    let lib = dup.remove_first("MyLib");
+    assert!(lib.is_none());
+
+    let lib = output.remove(my_lib_path.to_string_lossy(), "MyLib");
+    assert!(lib.is_some());
+    let lib = output.remove(my_lib_path.to_string_lossy(), "MyLib");
+    assert!(lib.is_none());
 }
 
 #[test]
@@ -1410,4 +1688,371 @@ fn can_purge_obsolete_artifacts() {
     assert!(!compiled.has_compiler_errors());
     assert!(!compiled.is_unchanged());
     assert_eq!(compiled.into_artifacts().count(), 1);
+}
+
+#[test]
+fn can_parse_notice() {
+    let mut project = TempProject::<ConfigurableArtifacts>::dapptools().unwrap();
+    project.project_mut().artifacts.additional_values.userdoc = true;
+    project.project_mut().solc_config.settings = project.project_mut().artifacts.settings();
+
+    let contract = r#"
+    pragma solidity $VERSION;
+
+   contract Contract {
+      string greeting;
+
+        /**
+         * @notice hello
+         */    
+         constructor(string memory _greeting) public {
+            greeting = _greeting;
+        }
+        
+        /**
+         * @notice hello
+         */
+        function xyz() public {
+        }
+        
+        /// @notice hello
+        function abc() public {
+        }
+   }
+   "#;
+    project.add_source("Contract", contract.replace("$VERSION", "=0.5.17")).unwrap();
+
+    let mut compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+    assert!(!compiled.is_unchanged());
+    assert!(compiled.find("Contract").is_some());
+    let userdoc = compiled.remove("Contract").unwrap().userdoc;
+
+    assert_eq!(
+        userdoc,
+        Some(UserDoc {
+            version: None,
+            kind: None,
+            methods: BTreeMap::from([
+                ("abc()".to_string(), UserDocNotice::Notice { notice: "hello".to_string() }),
+                ("xyz()".to_string(), UserDocNotice::Notice { notice: "hello".to_string() }),
+                ("constructor".to_string(), UserDocNotice::Constructor("hello".to_string())),
+            ]),
+            events: BTreeMap::new(),
+            errors: BTreeMap::new(),
+            notice: None
+        })
+    );
+
+    project.add_source("Contract", contract.replace("$VERSION", "^0.8.10")).unwrap();
+
+    let mut compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+    assert!(!compiled.is_unchanged());
+    assert!(compiled.find("Contract").is_some());
+    let userdoc = compiled.remove("Contract").unwrap().userdoc;
+
+    assert_eq!(
+        userdoc,
+        Some(UserDoc {
+            version: Some(1),
+            kind: Some("user".to_string()),
+            methods: BTreeMap::from([
+                ("abc()".to_string(), UserDocNotice::Notice { notice: "hello".to_string() }),
+                ("xyz()".to_string(), UserDocNotice::Notice { notice: "hello".to_string() }),
+                ("constructor".to_string(), UserDocNotice::Notice { notice: "hello".to_string() }),
+            ]),
+            events: BTreeMap::new(),
+            errors: BTreeMap::new(),
+            notice: None
+        })
+    );
+}
+
+#[test]
+fn can_parse_doc() {
+    let mut project = TempProject::<ConfigurableArtifacts>::dapptools().unwrap();
+    project.project_mut().artifacts.additional_values.userdoc = true;
+    project.project_mut().artifacts.additional_values.devdoc = true;
+    project.project_mut().solc_config.settings = project.project_mut().artifacts.settings();
+
+    let contract = r#"
+// SPDX-License-Identifier: GPL-3.0-only
+pragma solidity ^0.8.0;
+
+/// @title Not an ERC20.
+/// @author Notadev
+/// @notice Do not use this.
+/// @dev This is not an ERC20 implementation.
+/// @custom:experimental This is an experimental contract.
+interface INotERC20 {
+    /// @notice Transfer tokens.
+    /// @dev Transfer `amount` tokens to account `to`.
+    /// @param to Target account.
+    /// @param amount Transfer amount.
+    /// @return A boolean value indicating whether the operation succeeded.
+    function transfer(address to, uint256 amount) external returns (bool);
+
+    /// @notice Transfer some tokens.
+    /// @dev Emitted when transfer.
+    /// @param from Source account.
+    /// @param to Target account.
+    /// @param value Transfer amount.
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /// @notice Insufficient balance for transfer.
+    /// @dev Needed `required` but only `available` available.
+    /// @param available Balance available.
+    /// @param required Requested amount to transfer.
+    error InsufficientBalance(uint256 available, uint256 required);
+}
+
+contract NotERC20 is INotERC20 {
+    /// @inheritdoc INotERC20
+    function transfer(address to, uint256 amount) external returns (bool) {
+        return false;
+    }
+}
+    "#;
+    project.add_source("Contract", contract).unwrap();
+
+    let mut compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+    assert!(!compiled.is_unchanged());
+
+    assert!(compiled.find("INotERC20").is_some());
+    let contract = compiled.remove("INotERC20").unwrap();
+    assert_eq!(
+        contract.userdoc,
+        Some(UserDoc {
+            version: Some(1),
+            kind: Some("user".to_string()),
+            notice: Some("Do not use this.".to_string()),
+            methods: BTreeMap::from([(
+                "transfer(address,uint256)".to_string(),
+                UserDocNotice::Notice { notice: "Transfer tokens.".to_string() }
+            ),]),
+            events: BTreeMap::from([(
+                "Transfer(address,address,uint256)".to_string(),
+                UserDocNotice::Notice { notice: "Transfer some tokens.".to_string() }
+            ),]),
+            errors: BTreeMap::from([(
+                "InsufficientBalance(uint256,uint256)".to_string(),
+                vec![UserDocNotice::Notice {
+                    notice: "Insufficient balance for transfer.".to_string()
+                }]
+            ),]),
+        })
+    );
+    assert_eq!(
+        contract.devdoc,
+        Some(DevDoc {
+            version: Some(1),
+            kind: Some("dev".to_string()),
+            author: Some("Notadev".to_string()),
+            details: Some("This is not an ERC20 implementation.".to_string()),
+            custom_experimental: Some("This is an experimental contract.".to_string()),
+            methods: BTreeMap::from([(
+                "transfer(address,uint256)".to_string(),
+                MethodDoc {
+                    details: Some("Transfer `amount` tokens to account `to`.".to_string()),
+                    params: BTreeMap::from([
+                        ("to".to_string(), "Target account.".to_string()),
+                        ("amount".to_string(), "Transfer amount.".to_string())
+                    ]),
+                    returns: BTreeMap::from([(
+                        "_0".to_string(),
+                        "A boolean value indicating whether the operation succeeded.".to_string()
+                    ),])
+                }
+            ),]),
+            events: BTreeMap::from([(
+                "Transfer(address,address,uint256)".to_string(),
+                EventDoc {
+                    details: Some("Emitted when transfer.".to_string()),
+                    params: BTreeMap::from([
+                        ("from".to_string(), "Source account.".to_string()),
+                        ("to".to_string(), "Target account.".to_string()),
+                        ("value".to_string(), "Transfer amount.".to_string()),
+                    ]),
+                }
+            ),]),
+            errors: BTreeMap::from([(
+                "InsufficientBalance(uint256,uint256)".to_string(),
+                vec![ErrorDoc {
+                    details: Some("Needed `required` but only `available` available.".to_string()),
+                    params: BTreeMap::from([
+                        ("available".to_string(), "Balance available.".to_string()),
+                        ("required".to_string(), "Requested amount to transfer.".to_string())
+                    ]),
+                }]
+            ),]),
+            title: Some("Not an ERC20.".to_string())
+        })
+    );
+
+    assert!(compiled.find("NotERC20").is_some());
+    let contract = compiled.remove("NotERC20").unwrap();
+    assert_eq!(
+        contract.userdoc,
+        Some(UserDoc {
+            version: Some(1),
+            kind: Some("user".to_string()),
+            notice: None,
+            methods: BTreeMap::from([(
+                "transfer(address,uint256)".to_string(),
+                UserDocNotice::Notice { notice: "Transfer tokens.".to_string() }
+            ),]),
+            events: BTreeMap::from([(
+                "Transfer(address,address,uint256)".to_string(),
+                UserDocNotice::Notice { notice: "Transfer some tokens.".to_string() }
+            ),]),
+            errors: BTreeMap::from([(
+                "InsufficientBalance(uint256,uint256)".to_string(),
+                vec![UserDocNotice::Notice {
+                    notice: "Insufficient balance for transfer.".to_string()
+                }]
+            ),]),
+        })
+    );
+    assert_eq!(
+        contract.devdoc,
+        Some(DevDoc {
+            version: Some(1),
+            kind: Some("dev".to_string()),
+            author: None,
+            details: None,
+            custom_experimental: None,
+            methods: BTreeMap::from([(
+                "transfer(address,uint256)".to_string(),
+                MethodDoc {
+                    details: Some("Transfer `amount` tokens to account `to`.".to_string()),
+                    params: BTreeMap::from([
+                        ("to".to_string(), "Target account.".to_string()),
+                        ("amount".to_string(), "Transfer amount.".to_string())
+                    ]),
+                    returns: BTreeMap::from([(
+                        "_0".to_string(),
+                        "A boolean value indicating whether the operation succeeded.".to_string()
+                    ),])
+                }
+            ),]),
+            events: BTreeMap::new(),
+            errors: BTreeMap::from([(
+                "InsufficientBalance(uint256,uint256)".to_string(),
+                vec![ErrorDoc {
+                    details: Some("Needed `required` but only `available` available.".to_string()),
+                    params: BTreeMap::from([
+                        ("available".to_string(), "Balance available.".to_string()),
+                        ("required".to_string(), "Requested amount to transfer.".to_string())
+                    ]),
+                }]
+            ),]),
+            title: None
+        })
+    );
+}
+
+#[test]
+fn test_relative_cache_entries() {
+    let project = TempProject::dapptools().unwrap();
+    let _a = project
+        .add_source(
+            "A",
+            r#"
+pragma solidity ^0.8.10;
+contract A { }
+"#,
+        )
+        .unwrap();
+    let _b = project
+        .add_source(
+            "B",
+            r#"
+pragma solidity ^0.8.10;
+contract B { }
+"#,
+        )
+        .unwrap();
+    let _c = project
+        .add_source(
+            "C",
+            r#"
+pragma solidity ^0.8.10;
+contract C { }
+"#,
+        )
+        .unwrap();
+    let _d = project
+        .add_source(
+            "D",
+            r#"
+pragma solidity ^0.8.10;
+contract D { }
+"#,
+        )
+        .unwrap();
+
+    let compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    let cache = SolFilesCache::read(project.cache_path()).unwrap();
+
+    let entries = vec![
+        PathBuf::from("src/A.sol"),
+        PathBuf::from("src/B.sol"),
+        PathBuf::from("src/C.sol"),
+        PathBuf::from("src/D.sol"),
+    ];
+    assert_eq!(entries, cache.files.keys().cloned().collect::<Vec<_>>());
+
+    let cache = SolFilesCache::read_joined(project.paths()).unwrap();
+
+    assert_eq!(
+        entries.into_iter().map(|p| project.root().join(p)).collect::<Vec<_>>(),
+        cache.files.keys().cloned().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_failure_after_removing_file() {
+    let project = TempProject::dapptools().unwrap();
+    project
+        .add_source(
+            "A",
+            r#"
+pragma solidity ^0.8.10;
+import "./B.sol";
+contract A { }
+"#,
+        )
+        .unwrap();
+
+    project
+        .add_source(
+            "B",
+            r#"
+pragma solidity ^0.8.10;
+import "./C.sol";
+contract B { }
+"#,
+        )
+        .unwrap();
+
+    let c = project
+        .add_source(
+            "C",
+            r#"
+pragma solidity ^0.8.10;
+contract C { }
+"#,
+        )
+        .unwrap();
+
+    let compiled = project.compile().unwrap();
+    assert!(!compiled.has_compiler_errors());
+
+    fs::remove_file(c).unwrap();
+    let compiled = project.compile().unwrap();
+    assert!(compiled.has_compiler_errors());
 }

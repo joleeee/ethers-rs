@@ -4,7 +4,8 @@ use crate::artifacts::{
     bytecode::{
         Bytecode, BytecodeObject, CompactBytecode, CompactDeployedBytecode, DeployedBytecode,
     },
-    serde_helpers, DevDoc, Evm, Ewasm, LosslessAbi, Metadata, Offsets, StorageLayout, UserDoc,
+    serde_helpers, DevDoc, Evm, Ewasm, LosslessAbi, LosslessMetadata, Offsets, StorageLayout,
+    UserDoc,
 };
 use ethers_core::{abi::Contract as Abi, types::Bytes};
 use serde::{Deserialize, Serialize};
@@ -22,7 +23,7 @@ pub struct Contract {
         skip_serializing_if = "Option::is_none",
         with = "serde_helpers::json_string_opt"
     )]
-    pub metadata: Option<Metadata>,
+    pub metadata: Option<LosslessMetadata>,
     #[serde(default)]
     pub userdoc: UserDoc,
     #[serde(default)]
@@ -88,7 +89,7 @@ impl ContractBytecode {
     /// use ethers_solc::artifacts::*;
     /// # fn demo(project: Project) {
     /// let mut output = project.compile().unwrap().output();
-    /// let contract: ContractBytecode = output.remove("Greeter").unwrap().into();
+    /// let contract: ContractBytecode = output.remove_first("Greeter").unwrap().into();
     /// let contract = contract.unwrap();
     /// # }
     /// ```
@@ -311,7 +312,7 @@ impl CompactContract {
     /// use ethers_solc::artifacts::*;
     /// # fn demo(project: Project) {
     /// let mut output = project.compile().unwrap().output();
-    /// let contract: CompactContract = output.remove("Greeter").unwrap().into();
+    /// let contract: CompactContract = output.remove_first("Greeter").unwrap().into();
     /// let contract = contract.unwrap();
     /// # }
     /// ```

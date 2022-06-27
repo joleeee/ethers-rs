@@ -9,8 +9,10 @@ use crate::{
             EwasmOutputSelection,
         },
         Ast, CompactContractBytecodeCow, DevDoc, Evm, Ewasm, FunctionDebugData, GasEstimates,
-        GeneratedSource, LosslessAbi, Metadata, Offsets, Settings, StorageLayout, UserDoc,
+        GeneratedSource, LosslessAbi, LosslessMetadata, Metadata, Offsets, Settings, StorageLayout,
+        UserDoc,
     },
+    sources::VersionedSourceFile,
     ArtifactOutput, SolcConfig, SolcError, SourceFile,
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,8 @@ pub struct ConfigurableContractArtifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gas_estimates: Option<GasEstimates>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_metadata: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Metadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage_layout: Option<StorageLayout>,
@@ -55,6 +59,9 @@ pub struct ConfigurableContractArtifact {
     pub ewasm: Option<Ewasm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ast: Option<Ast>,
+    /// The identifier of the source file
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u32>,
 }
 
 impl ConfigurableContractArtifact {
@@ -76,6 +83,11 @@ impl ConfigurableContractArtifact {
             }
         }
         links
+    }
+
+    /// Returns the source file of this artifact's contract
+    pub fn source_file(&self) -> Option<SourceFile> {
+        self.id.map(|id| SourceFile { id, ast: self.ast.clone() })
     }
 }
 
@@ -223,6 +235,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
     ) -> Self::Artifact {
         let mut artifact_userdoc = None;
         let mut artifact_devdoc = None;
+        let mut artifact_raw_metadata = None;
         let mut artifact_metadata = None;
         let mut artifact_ir = None;
         let mut artifact_ir_optimized = None;
@@ -249,7 +262,10 @@ impl ArtifactOutput for ConfigurableArtifacts {
         } = contract;
 
         if self.additional_values.metadata {
-            artifact_metadata = metadata;
+            if let Some(LosslessMetadata { raw_metadata, metadata }) = metadata {
+                artifact_raw_metadata = Some(raw_metadata);
+                artifact_metadata = Some(metadata);
+            }
         }
         if self.additional_values.userdoc {
             artifact_userdoc = Some(userdoc);
@@ -309,6 +325,7 @@ impl ArtifactOutput for ConfigurableArtifacts {
             function_debug_data: artifact_function_debug_data,
             method_identifiers: artifact_method_identifiers,
             gas_estimates: artifact_gas_estimates,
+            raw_metadata: artifact_raw_metadata,
             metadata: artifact_metadata,
             storage_layout: artifact_storage_layout,
             userdoc: artifact_userdoc,
@@ -316,9 +333,25 @@ impl ArtifactOutput for ConfigurableArtifacts {
             ir: artifact_ir,
             ir_optimized: artifact_ir_optimized,
             ewasm: artifact_ewasm,
+            id: source_file.as_ref().map(|s| s.id),
             ast: source_file.and_then(|s| s.ast.clone()),
             generated_sources: generated_sources.unwrap_or_default(),
         }
+    }
+
+    fn standalone_source_file_to_artifact(
+        &self,
+        _path: &str,
+        file: &VersionedSourceFile,
+    ) -> Option<Self::Artifact> {
+        file.source_file.ast.clone().map(|ast| ConfigurableContractArtifact {
+            abi: Some(LosslessAbi::default()),
+            id: Some(file.source_file.id),
+            ast: Some(ast),
+            bytecode: Some(CompactBytecode::empty()),
+            deployed_bytecode: Some(CompactDeployedBytecode::empty()),
+            ..Default::default()
+        })
     }
 }
 
@@ -539,7 +572,7 @@ impl ExtraOutputFiles {
         if self.metadata {
             if let Some(ref metadata) = contract.metadata {
                 let file = file.with_extension("metadata.json");
-                fs::write(&file, serde_json::to_string_pretty(metadata)?)
+                fs::write(&file, serde_json::to_string_pretty(&metadata.raw_json()?)?)
                     .map_err(|err| SolcError::io(err, file))?
             }
         }

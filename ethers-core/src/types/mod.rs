@@ -5,7 +5,7 @@ pub type Selector = [u8; 4];
 /// A transaction Hash
 pub use ethabi::ethereum_types::H256 as TxHash;
 
-pub use ethabi::ethereum_types::{Address, Bloom, H160, H256, H512, U128, U256, U64};
+pub use ethabi::ethereum_types::{Address, Bloom, H160, H256, H512, H64, U128, U256, U64};
 
 pub mod transaction;
 pub use transaction::{
@@ -37,7 +37,10 @@ pub use block::{Block, BlockId, BlockNumber, TimeError};
 pub use block::Randomness;
 
 mod log;
-pub use log::{Filter, FilterBlockOption, Log, ValueOrArray};
+pub use log::Log;
+
+mod filter;
+pub use filter::*;
 
 mod ens;
 pub use ens::NameOrAddress;
